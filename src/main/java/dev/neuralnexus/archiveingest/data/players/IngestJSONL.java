@@ -23,6 +23,10 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Base64;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class IngestJSONL {
     private static final Gson gson = new GsonBuilder()
@@ -179,7 +183,7 @@ public class IngestJSONL {
     }
 
     private static void processPlayer(
-            final @NonNull Player player,
+            final @NonNull ParsedPlayer parsedPlayer,
             final @NonNull PreparedStatement playerStmt,
             final @NonNull PreparedStatement playerTextureStmt,
             final @NonNull PreparedStatement playerNameStmt,
@@ -187,46 +191,40 @@ public class IngestJSONL {
             final @NonNull Object2IntOpenHashMap<String> skinCache,
             final @NonNull Object2IntOpenHashMap<String> capeCache) throws SQLException {
 
+        final Player player = parsedPlayer.player();
+        final TextureData textureData = parsedPlayer.textureData();
+
         long lastUpdated = player.timestamp();
 
-        if (player.properties() != null) {
-            for (final Property property : player.properties()) {
-                if (!property.name().equals("textures")) {
-                    throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
-                }
+        if (textureData != null) {
+            lastUpdated = Math.max(lastUpdated, textureData.timestamp());
 
-                final String decoded = new String(Base64.getDecoder().decode(property.value()));
-                final TextureData textureData = gson.fromJson(decoded, TextureData.class);
+            Integer skinId = null;
+            Integer capeId = null;
 
-                lastUpdated = Math.max(lastUpdated, textureData.timestamp());
-
-                Integer skinId = null;
-                Integer capeId = null;
-
-                if (textureData.textures().SKIN() != null) {
-                    final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
-                    final String model = textureData.textures().SKIN().metadata() != null
-                            ? textureData.textures().SKIN().metadata().model()
-                            : null;
-                    skinId = upsertSkin(conn, skinCache, skinHash, model);
-                }
-
-                if (textureData.textures().CAPE() != null) {
-                    final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
-                    capeId = upsertCape(conn, capeCache, capeHash);
-                }
-
-                playerTextureStmt.setString(1, player.id());
-                playerTextureStmt.setObject(2, skinId);
-                playerTextureStmt.setObject(3, capeId);
-                playerTextureStmt.setLong(4, textureData.timestamp());
-                playerTextureStmt.addBatch();
-
-                playerNameStmt.setString(1, player.id());
-                playerNameStmt.setString(2, player.name());
-                playerNameStmt.setLong(3, textureData.timestamp());
-                playerNameStmt.addBatch();
+            if (textureData.textures().SKIN() != null) {
+                final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
+                final String model = textureData.textures().SKIN().metadata() != null
+                        ? textureData.textures().SKIN().metadata().model()
+                        : null;
+                skinId = upsertSkin(conn, skinCache, skinHash, model);
             }
+
+            if (textureData.textures().CAPE() != null) {
+                final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
+                capeId = upsertCape(conn, capeCache, capeHash);
+            }
+
+            playerTextureStmt.setString(1, player.id());
+            playerTextureStmt.setObject(2, skinId);
+            playerTextureStmt.setObject(3, capeId);
+            playerTextureStmt.setLong(4, textureData.timestamp());
+            playerTextureStmt.addBatch();
+
+            playerNameStmt.setString(1, player.id());
+            playerNameStmt.setString(2, player.name());
+            playerNameStmt.setLong(3, textureData.timestamp());
+            playerNameStmt.addBatch();
         }
 
         playerStmt.setString(1, player.id());
@@ -239,30 +237,117 @@ public class IngestJSONL {
     }
 
     public static void ingest(final @NonNull String filePath) {
-        final int BATCH_SIZE = 10000;
+        final int BATCH_SIZE = 50000;
+        final int QUEUE_CAPACITY = 50000;
 
         final Object2IntOpenHashMap<String> skinCache = new Object2IntOpenHashMap<>();
         final Object2IntOpenHashMap<String> capeCache = new Object2IntOpenHashMap<>();
 
-        try (final BufferedReader reader = new BufferedReader(new FileReader(filePath));
-             final var conn = ds.getConnection();
+        try (final var conn = ds.getConnection()) {
+            System.out.println("Pre-populating skin cache...");
+            try (final var stmt = conn.createStatement();
+                 final var rs = stmt.executeQuery("SELECT id, hash FROM skins")) {
+                while (rs.next()) skinCache.put(rs.getString("hash"), rs.getInt("id"));
+            }
+            System.out.println("Skin cache populated with " + skinCache.size() + " entries.");
+
+            System.out.println("Pre-populating cape cache...");
+            try (final var stmt = conn.createStatement();
+                 final var rs = stmt.executeQuery("SELECT id, hash FROM capes")) {
+                while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
+            }
+            System.out.println("Cape cache populated with " + capeCache.size() + " entries.");
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred while pre-populating caches.");
+            return;
+        }
+
+        final LinkedBlockingQueue<String> lineQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+        final LinkedBlockingQueue<ParsedPlayer> playerQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
+        final String POISON_PILL = "__DONE__";
+        final ParsedPlayer PLAYER_POISON_PILL = new ParsedPlayer(new Player("", "", null, null, 0L, null, null), null);
+
+        final long startTime = System.currentTimeMillis();
+
+        @SuppressWarnings("resource")
+        final ExecutorService executor = Executors.newFixedThreadPool(2);
+
+        final AtomicBoolean failed = new AtomicBoolean(false);
+
+        // Reader thread
+        executor.submit(() -> {
+            try (final BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    lineQueue.put(line);
+                }
+            } catch (final Exception e) {
+                //noinspection CallToPrintStackTrace
+                e.printStackTrace();
+                failed.set(true);
+            } finally {
+                try { lineQueue.put(POISON_PILL); } catch (final InterruptedException ignored) {}
+            }
+        });
+
+        // Deserializer thread
+        executor.submit(() -> {
+            try {
+                while (true) {
+                    final String line = lineQueue.take();
+                    if (line.equals(POISON_PILL)) break;
+                    final Player player = gson.fromJson(line, Player.class);
+
+                    TextureData textureData = null;
+                    if (player.properties() != null) {
+                        for (final Property property : player.properties()) {
+                            if (!property.name().equals("textures")) {
+                                throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
+                            }
+                            final String decoded = new String(Base64.getDecoder().decode(property.value()));
+                            textureData = gson.fromJson(decoded, TextureData.class);
+                        }
+                    }
+
+                    playerQueue.put(new ParsedPlayer(player, textureData));
+                }
+            } catch (final Exception e) {
+                //noinspection CallToPrintStackTrace
+                e.printStackTrace();
+                failed.set(true);
+            } finally {
+                try { playerQueue.put(PLAYER_POISON_PILL); } catch (final InterruptedException ignored) {}
+            }
+        });
+
+        // DB thread (main)
+        try (final var conn = ds.getConnection();
              final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
              final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
              final var playerNameStmt = conn.prepareStatement(INSERT_PLAYER_NAME_SQL)) {
 
             conn.setAutoCommit(false);
 
-            String line;
             int count = 0;
-            while ((line = reader.readLine()) != null) {
-                final Player player = gson.fromJson(line, Player.class);
-                processPlayer(player, playerStmt, playerTextureStmt, playerNameStmt, conn, skinCache, capeCache);
+            while (true) {
+                final ParsedPlayer parsedPlayer = playerQueue.take();
+                if (parsedPlayer == PLAYER_POISON_PILL) break;
+                if (failed.get()) {
+                    System.out.println("Worker thread failed, aborting ingestion.");
+                    break;
+                }
+                processPlayer(parsedPlayer, playerStmt, playerTextureStmt, playerNameStmt, conn, skinCache, capeCache);
 
                 if (++count % BATCH_SIZE == 0) {
                     playerStmt.executeBatch();
                     playerTextureStmt.executeBatch();
                     playerNameStmt.executeBatch();
                     conn.commit();
+                    final long elapsed = System.currentTimeMillis() - startTime;
+                    System.out.printf("Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                            count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
                 }
             }
 
@@ -272,13 +357,19 @@ public class IngestJSONL {
             playerNameStmt.executeBatch();
             conn.commit();
 
-            System.out.println("Ingestion completed successfully. Rows processed: " + count);
+            final long elapsed = System.currentTimeMillis() - startTime;
+            System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                    count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();
             System.out.println("An error occurred during ingestion.");
+        } finally {
+            executor.shutdown();
         }
     }
+
+    record ParsedPlayer(Player player, @Nullable TextureData textureData) {}
 
     public record Player(
             @NonNull String id,

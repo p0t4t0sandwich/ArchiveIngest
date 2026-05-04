@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class IngestJSONL {
     private static final Gson gson = new GsonBuilder()
@@ -63,14 +64,14 @@ public class IngestJSONL {
     private static void startup() {
         final String createSkinsSQL = """
         CREATE TABLE IF NOT EXISTS skins (
-            id INTEGER PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             hash TEXT NOT NULL UNIQUE,
             model TEXT
         );
     """;
         final String createCapesSQL = """
         CREATE TABLE IF NOT EXISTS capes (
-            id INTEGER PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             hash TEXT NOT NULL UNIQUE
         );
     """;
@@ -130,14 +131,12 @@ public class IngestJSONL {
         """;
 
     private static final String INSERT_SKIN_SQL = """
-        INSERT INTO skins (id, hash, model)
-        SELECT COALESCE(MAX(id), 0) + 1, ?, ? FROM skins
+        INSERT INTO skins (hash, model) VALUES (?, ?)
         ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
         RETURNING id
         """;
     private static final String INSERT_CAPE_SQL = """
-        INSERT INTO capes (id, hash)
-        SELECT COALESCE(MAX(id), 0) + 1, ? FROM capes
+        INSERT INTO capes (hash) VALUES (?)
         ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
         RETURNING id
         """;
@@ -183,41 +182,22 @@ public class IngestJSONL {
     }
 
     private static void processPlayer(
-            final @NonNull ParsedPlayer parsedPlayer,
+            final @NonNull ResolvedPlayer resolvedPlayer,
             final @NonNull PreparedStatement playerStmt,
             final @NonNull PreparedStatement playerTextureStmt,
-            final @NonNull PreparedStatement playerNameStmt,
-            final @NonNull Connection conn,
-            final @NonNull Object2IntOpenHashMap<String> skinCache,
-            final @NonNull Object2IntOpenHashMap<String> capeCache) throws SQLException {
+            final @NonNull PreparedStatement playerNameStmt) throws SQLException {
 
-        final Player player = parsedPlayer.player();
-        final TextureData textureData = parsedPlayer.textureData();
+        final Player player = resolvedPlayer.player();
+        final TextureData textureData = resolvedPlayer.textureData();
 
         long lastUpdated = player.timestamp();
 
         if (textureData != null) {
             lastUpdated = Math.max(lastUpdated, textureData.timestamp());
 
-            Integer skinId = null;
-            Integer capeId = null;
-
-            if (textureData.textures().SKIN() != null) {
-                final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
-                final String model = textureData.textures().SKIN().metadata() != null
-                        ? textureData.textures().SKIN().metadata().model()
-                        : null;
-                skinId = upsertSkin(conn, skinCache, skinHash, model);
-            }
-
-            if (textureData.textures().CAPE() != null) {
-                final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
-                capeId = upsertCape(conn, capeCache, capeHash);
-            }
-
             playerTextureStmt.setString(1, player.id());
-            playerTextureStmt.setObject(2, skinId);
-            playerTextureStmt.setObject(3, capeId);
+            playerTextureStmt.setObject(2, resolvedPlayer.skinId());
+            playerTextureStmt.setObject(3, resolvedPlayer.capeId());
             playerTextureStmt.setLong(4, textureData.timestamp());
             playerTextureStmt.addBatch();
 
@@ -238,7 +218,7 @@ public class IngestJSONL {
 
     public static void ingest(final @NonNull String filePath) {
         final int BATCH_SIZE = 50000;
-        final int QUEUE_CAPACITY = 50000;
+        final int QUEUE_CAPACITY = 10000;
 
         final Object2IntOpenHashMap<String> skinCache = new Object2IntOpenHashMap<>();
         final Object2IntOpenHashMap<String> capeCache = new Object2IntOpenHashMap<>();
@@ -266,15 +246,23 @@ public class IngestJSONL {
 
         final LinkedBlockingQueue<String> lineQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
         final LinkedBlockingQueue<ParsedPlayer> playerQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
-        final String POISON_PILL = "__DONE__";
-        final ParsedPlayer PLAYER_POISON_PILL = new ParsedPlayer(new Player("", "", null, null, 0L, null, null), null);
+        final LinkedBlockingQueue<ResolvedPlayer> resolvedQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
 
-        final long startTime = System.currentTimeMillis();
+        final String POISON_PILL = "__DONE__";
+        final ParsedPlayer PARSED_POISON_PILL = new ParsedPlayer(new Player("", "", null, null, 0L, null, null), null);
+        final ResolvedPlayer RESOLVED_POISON_PILL = new ResolvedPlayer(new Player("", "", null, null, 0L, null, null), null, null, null);
+
+        final int DESERIALIZER_THREADS = 1;
+        final int RESOLUTION_THREADS = 3;
 
         @SuppressWarnings("resource")
-        final ExecutorService executor = Executors.newFixedThreadPool(2);
+        final ExecutorService executor = Executors.newFixedThreadPool(1 + DESERIALIZER_THREADS + RESOLUTION_THREADS);
 
         final AtomicBoolean failed = new AtomicBoolean(false);
+        final AtomicInteger deserializerThreadsDone = new AtomicInteger(0);
+        final AtomicInteger resolutionThreadsDone = new AtomicInteger(0);
+
+        final long startTime = System.currentTimeMillis();
 
         // Reader thread
         executor.submit(() -> {
@@ -292,37 +280,94 @@ public class IngestJSONL {
             }
         });
 
-        // Deserializer thread
-        executor.submit(() -> {
-            try {
-                while (true) {
-                    final String line = lineQueue.take();
-                    if (line.equals(POISON_PILL)) break;
-                    final Player player = gson.fromJson(line, Player.class);
-
-                    TextureData textureData = null;
-                    if (player.properties() != null) {
-                        for (final Property property : player.properties()) {
-                            if (!property.name().equals("textures")) {
-                                throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
-                            }
-                            final String decoded = new String(Base64.getDecoder().decode(property.value()));
-                            textureData = gson.fromJson(decoded, TextureData.class);
+        // Deserializer threads
+        for (int i = 0; i < DESERIALIZER_THREADS; i++) {
+            executor.submit(() -> {
+                try {
+                    while (true) {
+                        final String line = lineQueue.take();
+                        if (line.equals(POISON_PILL)) {
+                            lineQueue.put(POISON_PILL);
+                            break;
                         }
+                        final Player player = gson.fromJson(line, Player.class);
+
+                        TextureData textureData = null;
+                        if (player.properties() != null) {
+                            for (final Property property : player.properties()) {
+                                if (!property.name().equals("textures")) {
+                                    throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
+                                }
+                                final String decoded = new String(Base64.getDecoder().decode(property.value()));
+                                textureData = gson.fromJson(decoded, TextureData.class);
+                            }
+                        }
+
+                        playerQueue.put(new ParsedPlayer(player, textureData));
                     }
-
-                    playerQueue.put(new ParsedPlayer(player, textureData));
+                } catch (final Exception e) {
+                    //noinspection CallToPrintStackTrace
+                    e.printStackTrace();
+                    failed.set(true);
+                } finally {
+                    if (deserializerThreadsDone.incrementAndGet() == DESERIALIZER_THREADS) {
+                        try {
+                            playerQueue.put(PARSED_POISON_PILL);
+                        } catch (final InterruptedException ignored) {}
+                    }
                 }
-            } catch (final Exception e) {
-                //noinspection CallToPrintStackTrace
-                e.printStackTrace();
-                failed.set(true);
-            } finally {
-                try { playerQueue.put(PLAYER_POISON_PILL); } catch (final InterruptedException ignored) {}
-            }
-        });
+            });
+        }
 
-        // DB thread (main)
+        // Resolution threads
+        for (int i = 0; i < RESOLUTION_THREADS; i++) {
+            executor.submit(() -> {
+                final Object2IntOpenHashMap<String> localSkinCache = new Object2IntOpenHashMap<>(skinCache);
+                final Object2IntOpenHashMap<String> localCapeCache = new Object2IntOpenHashMap<>(capeCache);
+                try (final var conn = ds.getConnection()) {
+                    while (true) {
+                        final ParsedPlayer parsedPlayer = playerQueue.take();
+                        if (parsedPlayer == PARSED_POISON_PILL) {
+                            // Re-queue poison pill for other resolution threads
+                            playerQueue.put(PARSED_POISON_PILL);
+                            break;
+                        }
+                        if (failed.get()) break;
+
+                        final TextureData textureData = parsedPlayer.textureData();
+                        Integer skinId = null;
+                        Integer capeId = null;
+
+                        if (textureData != null) {
+                            if (textureData.textures().SKIN() != null) {
+                                final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
+                                final String model = textureData.textures().SKIN().metadata() != null
+                                        ? textureData.textures().SKIN().metadata().model()
+                                        : null;
+                                skinId = upsertSkin(conn, localSkinCache, skinHash, model);
+                            }
+
+                            if (textureData.textures().CAPE() != null) {
+                                final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
+                                capeId = upsertCape(conn, localCapeCache, capeHash);
+                            }
+                        }
+
+                        resolvedQueue.put(new ResolvedPlayer(parsedPlayer.player(), textureData, skinId, capeId));
+                    }
+                } catch (final Exception e) {
+                    //noinspection CallToPrintStackTrace
+                    e.printStackTrace();
+                    failed.set(true);
+                } finally {
+                    if (resolutionThreadsDone.incrementAndGet() == RESOLUTION_THREADS) {
+                        try { resolvedQueue.put(RESOLVED_POISON_PILL); } catch (final InterruptedException ignored) {}
+                    }
+                }
+            });
+        }
+
+        // DB insert thread (main)
         try (final var conn = ds.getConnection();
              final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
              final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
@@ -332,13 +377,13 @@ public class IngestJSONL {
 
             int count = 0;
             while (true) {
-                final ParsedPlayer parsedPlayer = playerQueue.take();
-                if (parsedPlayer == PLAYER_POISON_PILL) break;
+                final ResolvedPlayer resolvedPlayer = resolvedQueue.take();
+                if (resolvedPlayer == RESOLVED_POISON_PILL) break;
                 if (failed.get()) {
                     System.out.println("Worker thread failed, aborting ingestion.");
                     break;
                 }
-                processPlayer(parsedPlayer, playerStmt, playerTextureStmt, playerNameStmt, conn, skinCache, capeCache);
+                processPlayer(resolvedPlayer, playerStmt, playerTextureStmt, playerNameStmt);
 
                 if (++count % BATCH_SIZE == 0) {
                     playerStmt.executeBatch();
@@ -351,15 +396,15 @@ public class IngestJSONL {
                 }
             }
 
-            // Flush remaining
-            playerStmt.executeBatch();
-            playerTextureStmt.executeBatch();
-            playerNameStmt.executeBatch();
-            conn.commit();
-
-            final long elapsed = System.currentTimeMillis() - startTime;
-            System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
-                    count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
+            if (!failed.get()) {
+                playerStmt.executeBatch();
+                playerTextureStmt.executeBatch();
+                playerNameStmt.executeBatch();
+                conn.commit();
+                final long elapsed = System.currentTimeMillis() - startTime;
+                System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                        count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
+            }
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();
@@ -369,7 +414,13 @@ public class IngestJSONL {
         }
     }
 
-    record ParsedPlayer(Player player, @Nullable TextureData textureData) {}
+    public record ParsedPlayer(Player player, @Nullable TextureData textureData) {}
+
+    public record ResolvedPlayer(
+            @NonNull Player player,
+            @Nullable TextureData textureData,
+            @Nullable Integer skinId,
+            @Nullable Integer capeId) {}
 
     public record Player(
             @NonNull String id,

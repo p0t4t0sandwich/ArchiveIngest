@@ -71,11 +71,12 @@ public class IngestJSONL {
     """;
         final String createPlayersSQL = """
         CREATE TABLE IF NOT EXISTS players (
-            id UUID PRIMARY KEY,
+            id UUID PRIMARY KEY NOT NULL,
             name TEXT NOT NULL,
             legacy BOOLEAN,
             demo BOOLEAN,
-            profile_actions JSONB
+            profile_actions JSONB,
+            last_updated BIGINT NOT NULL
         );
     """;
         final String createPlayerTexturesSQL = """
@@ -113,8 +114,16 @@ public class IngestJSONL {
 
     private static final String TEXTURE_BASE_URL = "http://textures.minecraft.net/texture/";
 
-    private static final String INSERT_PLAYER_SQL =
-            "INSERT INTO players (id, name, legacy, demo, profile_actions) VALUES (?::uuid, ?, ?, ?, ?::jsonb) ON CONFLICT (id) DO NOTHING";
+    private static final String INSERT_PLAYER_SQL = """
+        INSERT INTO players (id, name, legacy, demo, profile_actions, last_updated) VALUES (?::uuid, ?, ?, ?, ?::jsonb, ?)
+        ON CONFLICT (id) DO UPDATE SET
+            name = CASE WHEN EXCLUDED.last_updated >= players.last_updated THEN EXCLUDED.name ELSE players.name END,
+            legacy = COALESCE(EXCLUDED.legacy, players.legacy),
+            demo = COALESCE(EXCLUDED.demo, players.demo),
+            profile_actions = CASE WHEN EXCLUDED.last_updated >= players.last_updated THEN EXCLUDED.profile_actions ELSE players.profile_actions END,
+            last_updated = GREATEST(EXCLUDED.last_updated, players.last_updated)
+        """;
+
     private static final String INSERT_SKIN_SQL = """
         INSERT INTO skins (id, hash, model)
         SELECT COALESCE(MAX(id), 0) + 1, ?, ? FROM skins
@@ -177,50 +186,55 @@ public class IngestJSONL {
             final @NonNull Object2IntOpenHashMap<String> skinCache,
             final @NonNull Object2IntOpenHashMap<String> capeCache) throws SQLException {
 
+        long lastUpdated = player.timestamp();
+
+        if (player.properties() != null) {
+            for (final Property property : player.properties()) {
+                if (!property.name().equals("textures")) {
+                    throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
+                }
+
+                final String decoded = new String(Base64.getDecoder().decode(property.value()));
+                final TextureData textureData = gson.fromJson(decoded, TextureData.class);
+
+                lastUpdated = Math.max(lastUpdated, textureData.timestamp());
+
+                Integer skinId = null;
+                Integer capeId = null;
+
+                if (textureData.textures().SKIN() != null) {
+                    final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
+                    final String model = textureData.textures().SKIN().metadata() != null
+                            ? textureData.textures().SKIN().metadata().model()
+                            : null;
+                    skinId = upsertSkin(conn, skinCache, skinHash, model);
+                }
+
+                if (textureData.textures().CAPE() != null) {
+                    final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
+                    capeId = upsertCape(conn, capeCache, capeHash);
+                }
+
+                playerTextureStmt.setString(1, player.id());
+                playerTextureStmt.setObject(2, skinId);
+                playerTextureStmt.setObject(3, capeId);
+                playerTextureStmt.setLong(4, textureData.timestamp());
+                playerTextureStmt.addBatch();
+
+                playerNameStmt.setString(1, player.id());
+                playerNameStmt.setString(2, player.name());
+                playerNameStmt.setLong(3, textureData.timestamp());
+                playerNameStmt.addBatch();
+            }
+        }
+
         playerStmt.setString(1, player.id());
         playerStmt.setString(2, player.name());
         playerStmt.setObject(3, player.legacy());
         playerStmt.setObject(4, player.demo());
         playerStmt.setString(5, gson.toJson(player.profileActions()));
+        playerStmt.setLong(6, lastUpdated);
         playerStmt.addBatch();
-
-        if (player.properties() == null) return;
-
-        for (final Property property : player.properties()) {
-            if (!property.name().equals("textures")) {
-                throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
-            }
-
-            final String decoded = new String(Base64.getDecoder().decode(property.value()));
-            final TextureData textureData = gson.fromJson(decoded, TextureData.class);
-
-            Integer skinId = null;
-            Integer capeId = null;
-
-            if (textureData.textures().SKIN() != null) {
-                final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
-                final String model = textureData.textures().SKIN().metadata() != null
-                        ? textureData.textures().SKIN().metadata().model()
-                        : null;
-                skinId = upsertSkin(conn, skinCache, skinHash, model);
-            }
-
-            if (textureData.textures().CAPE() != null) {
-                final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
-                capeId = upsertCape(conn, capeCache, capeHash);
-            }
-
-            playerTextureStmt.setString(1, player.id());
-            playerTextureStmt.setObject(2, skinId);
-            playerTextureStmt.setObject(3, capeId);
-            playerTextureStmt.setLong(4, textureData.timestamp());
-            playerTextureStmt.addBatch();
-
-            playerNameStmt.setString(1, player.id());
-            playerNameStmt.setString(2, player.name());
-            playerNameStmt.setLong(3, textureData.timestamp());
-            playerNameStmt.addBatch();
-        }
     }
 
     public static void ingest(final @NonNull String filePath) {
@@ -270,6 +284,7 @@ public class IngestJSONL {
             @NonNull String name,
             @Nullable Boolean legacy,
             @Nullable Boolean demo,
+            long timestamp,
             @Nullable JsonObject[] profileActions,
             Property @Nullable[] properties) {
         public static class Deserializer implements JsonDeserializer<Player> {

@@ -1,6 +1,7 @@
 package dev.neuralnexus.archiveingest;
 
 import dev.neuralnexus.archiveingest.compression.CompressionType;
+import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
 import org.jspecify.annotations.NonNull;
@@ -45,14 +46,10 @@ public class Main {
     }
 
     private static void handleDecompression(final @NonNull String type, final @NonNull String inputFile, final @NonNull String outputFile) {
-        //noinspection SwitchStatementWithTooFewBranches
         switch (CompressionType.of(type)) {
-            case ZSTD:
-                Zstd.decompress(inputFile, outputFile);
-                break;
-            default:
-                System.out.println("Unsupported compression type: " + type);
-                break;
+            case SEVEN_ZIP -> SevenZip.decompress(inputFile, outputFile);
+            case ZSTD -> Zstd.decompress(inputFile, outputFile);
+            default -> System.out.println("Unsupported compression type: " + type);
         }
     }
 

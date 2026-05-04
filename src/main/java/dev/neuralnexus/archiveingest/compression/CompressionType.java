@@ -3,6 +3,7 @@ package dev.neuralnexus.archiveingest.compression;
 import org.jspecify.annotations.NonNull;
 
 public enum CompressionType {
+    SEVEN_ZIP("7zip"),
     ZSTD("zstd");
 
     private final String type;

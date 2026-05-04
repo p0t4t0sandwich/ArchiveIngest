@@ -40,6 +40,6 @@ dependencies {
     implementation("org.postgresql:postgresql:42.7.11")
     implementation("org.xerial:sqlite-jdbc:3.50.2.0")
 
-    // zst archives
     implementation("com.github.luben:zstd-jni:1.5.7-8:linux_amd64")
+    implementation("org.apache.commons:commons-compress:1.28.0")
 }

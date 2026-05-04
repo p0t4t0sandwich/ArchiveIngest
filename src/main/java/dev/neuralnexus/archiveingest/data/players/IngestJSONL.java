@@ -50,6 +50,7 @@ public class IngestJSONL {
         config.addDataSourceProperty("portNumber", port);
         config.setDataSourceClassName("org.postgresql.ds.PGSimpleDataSource");
         config.setPoolName("ArchiveIngestPostgreSQLPool");
+        config.setConnectionInitSql("SET synchronous_commit = off; SET work_mem = '64MB';");
         ds = new HikariDataSource(config);
 
         startup();
@@ -238,7 +239,7 @@ public class IngestJSONL {
     }
 
     public static void ingest(final @NonNull String filePath) {
-        final int BATCH_SIZE = 1000;
+        final int BATCH_SIZE = 10000;
 
         final Object2IntOpenHashMap<String> skinCache = new Object2IntOpenHashMap<>();
         final Object2IntOpenHashMap<String> capeCache = new Object2IntOpenHashMap<>();

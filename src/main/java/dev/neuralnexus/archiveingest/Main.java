@@ -1,6 +1,7 @@
 package dev.neuralnexus.archiveingest;
 
 import dev.neuralnexus.archiveingest.compression.CompressionType;
+import dev.neuralnexus.archiveingest.compression.GZip;
 import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
@@ -47,6 +48,7 @@ public class Main {
 
     private static void handleDecompression(final @NonNull String type, final @NonNull String inputFile, final @NonNull String outputFile) {
         switch (CompressionType.of(type)) {
+            case GZIP -> GZip.decompress(inputFile, outputFile);
             case SEVEN_ZIP -> SevenZip.decompress(inputFile, outputFile);
             case ZSTD -> Zstd.decompress(inputFile, outputFile);
             default -> System.out.println("Unsupported compression type: " + type);

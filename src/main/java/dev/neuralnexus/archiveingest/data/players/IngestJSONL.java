@@ -192,7 +192,35 @@ public class IngestJSONL {
 
         final long startTime = System.currentTimeMillis();
 
-        final HashMap<String, String> allSkinHashes = new HashMap<>(); // hash -> model
+        // Pre-fetch existing skins into cache
+        System.out.println("Pre-fetching existing skins...");
+        try (final var conn = ds.getConnection();
+             final var s = conn.createStatement();
+             final var rs = s.executeQuery("SELECT id, hash, model FROM skins")) {
+            while (rs.next()) skinCache.put(rs.getString("hash") + ":" + rs.getString("model"), rs.getInt("id"));
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred while pre-fetching skins.");
+            return;
+        }
+        System.out.println("Pre-fetched " + skinCache.size() + " existing skins.");
+
+        // Pre-fetch existing capes into cache
+        System.out.println("Pre-fetching existing capes...");
+        try (final var conn = ds.getConnection();
+             final var s = conn.createStatement();
+             final var rs = s.executeQuery("SELECT id, hash FROM capes")) {
+            while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred while pre-fetching capes.");
+            return;
+        }
+        System.out.println("Pre-fetched " + capeCache.size() + " existing capes.");
+
+        final HashMap<String, String> allSkinHashes = new HashMap<>();
         final HashSet<String> allCapeHashes = new HashSet<>();
 
         // Hash collection

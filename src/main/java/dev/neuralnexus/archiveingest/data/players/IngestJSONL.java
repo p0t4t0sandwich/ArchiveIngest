@@ -11,24 +11,37 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.postgresql.copy.CopyManager;
+import org.postgresql.core.BaseConnection;
 
 import javax.sql.DataSource;
 import java.io.BufferedReader;
 import java.io.FileReader;
+import java.io.StringReader;
 import java.lang.reflect.Type;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * Primarily for ingesting mojang.jsonl from: <br>
+ * minecraft-uuids-2024-02-02 <br>
+ * minecraft-uuids-2024-02-22 <br>
+ * minecraft-uuids-2029-09-01
+ */
 public class IngestJSONL {
     private static final Gson gson = new GsonBuilder()
             .setLenient()
@@ -65,8 +78,9 @@ public class IngestJSONL {
         final String createSkinsSQL = """
         CREATE TABLE IF NOT EXISTS skins (
             id SERIAL PRIMARY KEY,
-            hash TEXT NOT NULL UNIQUE,
-            model TEXT
+            hash TEXT NOT NULL,
+            model TEXT,
+            UNIQUE (hash, model)
         );
     """;
         final String createCapesSQL = """
@@ -130,56 +144,11 @@ public class IngestJSONL {
             last_updated = GREATEST(EXCLUDED.last_updated, players.last_updated)
         """;
 
-    private static final String INSERT_SKIN_SQL = """
-        INSERT INTO skins (hash, model) VALUES (?, ?)
-        ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
-        RETURNING id
-        """;
-    private static final String INSERT_CAPE_SQL = """
-        INSERT INTO capes (hash) VALUES (?)
-        ON CONFLICT (hash) DO UPDATE SET hash = EXCLUDED.hash
-        RETURNING id
-        """;
     private static final String INSERT_PLAYER_TEXTURE_SQL =
             "INSERT INTO player_textures (player_id, skin_id, cape_id, timestamp) VALUES (?::uuid, ?, ?, ?) ON CONFLICT (player_id, timestamp) DO NOTHING";
     private static final String INSERT_PLAYER_NAME_SQL =
             "INSERT INTO player_names (player_id, name, timestamp) VALUES (?::uuid, ?, ?) ON CONFLICT (player_id, name, timestamp) DO NOTHING";
 
-    private static Integer upsertSkin(
-            final @NonNull Connection conn,
-            final @NonNull Object2IntOpenHashMap<String> skinCache,
-            final @NonNull String skinHash,
-            final @Nullable String model) throws SQLException {
-        if (skinCache.containsKey(skinHash)) return skinCache.getInt(skinHash);
-        try (final var stmt = conn.prepareStatement(INSERT_SKIN_SQL)) {
-            stmt.setString(1, skinHash);
-            stmt.setString(2, model);
-            final var rs = stmt.executeQuery();
-            if (rs.next()) {
-                final int id = rs.getInt(1);
-                skinCache.put(skinHash, id);
-                return id;
-            }
-        }
-        return null;
-    }
-
-    private static Integer upsertCape(
-            final @NonNull Connection conn,
-            final @NonNull Object2IntOpenHashMap<String> capeCache,
-            final @NonNull String capeHash) throws SQLException {
-        if (capeCache.containsKey(capeHash)) return capeCache.getInt(capeHash);
-        try (final var stmt = conn.prepareStatement(INSERT_CAPE_SQL)) {
-            stmt.setString(1, capeHash);
-            final var rs = stmt.executeQuery();
-            if (rs.next()) {
-                final int id = rs.getInt(1);
-                capeCache.put(capeHash, id);
-                return id;
-            }
-        }
-        return null;
-    }
 
     private static void processPlayer(
             final @NonNull ResolvedPlayer resolvedPlayer,
@@ -216,33 +185,149 @@ public class IngestJSONL {
         playerStmt.addBatch();
     }
 
-    public static void ingest(final @NonNull String filePath) {
-        final int BATCH_SIZE = 50000;
-        final int QUEUE_CAPACITY = 10000;
+    private static void preIngest(
+            final @NonNull String filePath,
+            final @NonNull ConcurrentHashMap<String, Integer> skinCache,
+            final @NonNull ConcurrentHashMap<String, Integer> capeCache) {
 
-        final Object2IntOpenHashMap<String> skinCache = new Object2IntOpenHashMap<>();
-        final Object2IntOpenHashMap<String> capeCache = new Object2IntOpenHashMap<>();
+        final long startTime = System.currentTimeMillis();
 
-        try (final var conn = ds.getConnection()) {
-            System.out.println("Pre-populating skin cache...");
-            try (final var stmt = conn.createStatement();
-                 final var rs = stmt.executeQuery("SELECT id, hash FROM skins")) {
-                while (rs.next()) skinCache.put(rs.getString("hash"), rs.getInt("id"));
+        final HashMap<String, String> allSkinHashes = new HashMap<>(); // hash -> model
+        final HashSet<String> allCapeHashes = new HashSet<>();
+
+        // Hash collection
+        System.out.println("Collecting hashes...");
+        try (final BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
+            String line;
+            int count = 0;
+            while ((line = reader.readLine()) != null) {
+                final Player player = gson.fromJson(line, Player.class);
+                if (player.properties() != null) {
+                    for (final Property property : player.properties()) {
+                        if (!property.name().equals("textures")) {
+                            throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
+                        }
+                        final String decoded = new String(Base64.getDecoder().decode(property.value()));
+                        final TextureData textureData = gson.fromJson(decoded, TextureData.class);
+                        if (textureData.textures().SKIN() != null) {
+                            final String skinHash = textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "");
+                            final String model = textureData.textures().SKIN().metadata() != null
+                                    ? textureData.textures().SKIN().metadata().model()
+                                    : null;
+                            allSkinHashes.putIfAbsent(skinHash, model);
+                        }
+                        if (textureData.textures().CAPE() != null) {
+                            allCapeHashes.add(textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, ""));
+                        }
+                    }
+                }
+                if (++count % 1000000 == 0) {
+                    System.out.printf("Hash collection: %d rows | Unique skins: %d | Unique capes: %d%n",
+                            count, allSkinHashes.size(), allCapeHashes.size());
+                }
             }
-            System.out.println("Skin cache populated with " + skinCache.size() + " entries.");
-
-            System.out.println("Pre-populating cape cache...");
-            try (final var stmt = conn.createStatement();
-                 final var rs = stmt.executeQuery("SELECT id, hash FROM capes")) {
-                while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
-            }
-            System.out.println("Cape cache populated with " + capeCache.size() + " entries.");
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();
-            System.out.println("An error occurred while pre-populating caches.");
+            System.out.println("An error occurred during hash collection.");
             return;
         }
+
+        final long collectionElapsed = System.currentTimeMillis() - startTime;
+        System.out.printf("Hash collection completed. Unique skins: %d | Unique capes: %d | Elapsed: %ds%n",
+                allSkinHashes.size(), allCapeHashes.size(), collectionElapsed / 1000);
+
+        // Bulk upsert skins via staging table
+        System.out.println("Upserting skins...");
+        try (final var conn = ds.getConnection();
+             final var s = conn.createStatement()) {
+            s.execute("SET work_mem = '1GB'");
+            s.execute("CREATE TEMP TABLE skins_staging (hash TEXT, model TEXT)");
+
+            final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
+            final StringBuilder data = new StringBuilder();
+            for (final Map.Entry<String, String> entry : allSkinHashes.entrySet()) {
+                data.append(entry.getKey())
+                        .append('\t')
+                        .append(entry.getValue() == null ? "\\N" : entry.getValue())
+                        .append('\n');
+            }
+            copyManager.copyIn("COPY skins_staging FROM STDIN", new StringReader(data.toString()));
+            System.out.println("Skin staging table populated.");
+
+            s.execute("""
+            INSERT INTO skins (hash, model)
+            SELECT hash, model FROM skins_staging
+            WHERE NOT EXISTS (
+                SELECT 1 FROM skins
+                WHERE skins.hash = skins_staging.hash
+                AND skins.model IS NOT DISTINCT FROM skins_staging.model
+            )
+            """);
+
+            try (final var rs = s.executeQuery("SELECT id, hash, model FROM skins")) {
+                while (rs.next()) skinCache.put(rs.getString("hash") + ":" + rs.getString("model"), rs.getInt("id"));
+            }
+            System.out.println("Skins upserted: " + skinCache.size());
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred while upserting skins.");
+            return;
+        }
+
+        // Bulk upsert capes via staging table
+        System.out.println("Upserting capes...");
+        try (final var conn = ds.getConnection();
+             final var s = conn.createStatement()) {
+            s.execute("SET work_mem = '1GB'");
+            s.execute("CREATE TEMP TABLE capes_staging (hash TEXT)");
+
+            final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
+            final StringBuilder data = new StringBuilder();
+            for (final String hash : allCapeHashes) {
+                data.append(hash).append('\n');
+            }
+            copyManager.copyIn("COPY capes_staging FROM STDIN", new StringReader(data.toString()));
+            System.out.println("Cape staging table populated.");
+
+            s.execute("""
+            INSERT INTO capes (hash)
+            SELECT hash FROM capes_staging
+            WHERE NOT EXISTS (
+                SELECT 1 FROM capes
+                WHERE capes.hash = capes_staging.hash
+            )
+            """);
+
+            try (final var rs = s.executeQuery("SELECT id, hash FROM capes")) {
+                while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
+            }
+            System.out.println("Capes upserted: " + capeCache.size());
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred while upserting capes.");
+            return;
+        }
+
+        final long totalElapsed = System.currentTimeMillis() - startTime;
+        System.out.printf("Pre-ingestion completed. Elapsed: %ds%n", totalElapsed / 1000);
+    }
+
+    public static void ingest(final @NonNull String filePath) {
+        final ConcurrentHashMap<String, Integer> skinCache = new ConcurrentHashMap<>();
+        final ConcurrentHashMap<String, Integer> capeCache = new ConcurrentHashMap<>();
+
+        System.out.println("Starting pre-ingestion...");
+        preIngest(filePath, skinCache, capeCache);
+
+        // Skip DB cache population — caches already warm from preIngest
+        System.out.println("Skin cache populated with " + skinCache.size() + " entries.");
+        System.out.println("Cape cache populated with " + capeCache.size() + " entries.");
+
+        final int BATCH_SIZE = 50000;
+        final int QUEUE_CAPACITY = 10000;
 
         final LinkedBlockingQueue<String> lineQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
         final LinkedBlockingQueue<ParsedPlayer> playerQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
@@ -276,7 +361,9 @@ public class IngestJSONL {
                 e.printStackTrace();
                 failed.set(true);
             } finally {
-                try { lineQueue.put(POISON_PILL); } catch (final InterruptedException ignored) {}
+                try {
+                    lineQueue.put(POISON_PILL);
+                } catch (final InterruptedException ignored) {}
             }
         });
 
@@ -324,7 +411,7 @@ public class IngestJSONL {
             executor.submit(() -> {
                 final Object2IntOpenHashMap<String> localSkinCache = new Object2IntOpenHashMap<>(skinCache);
                 final Object2IntOpenHashMap<String> localCapeCache = new Object2IntOpenHashMap<>(capeCache);
-                try (final var conn = ds.getConnection()) {
+                try {
                     while (true) {
                         final ParsedPlayer parsedPlayer = playerQueue.take();
                         if (parsedPlayer == PARSED_POISON_PILL) {
@@ -344,12 +431,14 @@ public class IngestJSONL {
                                 final String model = textureData.textures().SKIN().metadata() != null
                                         ? textureData.textures().SKIN().metadata().model()
                                         : null;
-                                skinId = upsertSkin(conn, localSkinCache, skinHash, model);
+                                //noinspection deprecation
+                                skinId = localSkinCache.get(skinHash + ":" + model);
                             }
 
                             if (textureData.textures().CAPE() != null) {
                                 final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
-                                capeId = upsertCape(conn, localCapeCache, capeHash);
+                                //noinspection deprecation
+                                capeId = localCapeCache.get(capeHash);
                             }
                         }
 
@@ -361,7 +450,9 @@ public class IngestJSONL {
                     failed.set(true);
                 } finally {
                     if (resolutionThreadsDone.incrementAndGet() == RESOLUTION_THREADS) {
-                        try { resolvedQueue.put(RESOLVED_POISON_PILL); } catch (final InterruptedException ignored) {}
+                        try {
+                            resolvedQueue.put(RESOLVED_POISON_PILL);
+                        } catch (final InterruptedException ignored) {}
                     }
                 }
             });

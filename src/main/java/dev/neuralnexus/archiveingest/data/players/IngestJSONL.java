@@ -220,8 +220,8 @@ public class IngestJSONL {
         }
         System.out.println("Pre-fetched " + capeCache.size() + " existing capes.");
 
-        final HashMap<String, String> allSkinHashes = new HashMap<>();
-        final HashSet<String> allCapeHashes = new HashSet<>();
+        final HashMap<String, String> newSkinHashes = new HashMap<>();
+        final HashSet<String> newCapeHashes = new HashSet<>();
 
         // Hash collection
         System.out.println("Collecting hashes...");
@@ -242,16 +242,21 @@ public class IngestJSONL {
                             final String model = textureData.textures().SKIN().metadata() != null
                                     ? textureData.textures().SKIN().metadata().model()
                                     : null;
-                            allSkinHashes.putIfAbsent(skinHash, model);
+                            if (!skinCache.containsKey(skinHash + ":" + model)) {
+                                newSkinHashes.putIfAbsent(skinHash + ":" + model, model);
+                            }
                         }
                         if (textureData.textures().CAPE() != null) {
-                            allCapeHashes.add(textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, ""));
+                            final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
+                            if (!capeCache.containsKey(capeHash)) {
+                                newCapeHashes.add(capeHash);
+                            }
                         }
                     }
                 }
                 if (++count % 1000000 == 0) {
-                    System.out.printf("Hash collection: %d rows | Unique skins: %d | Unique capes: %d%n",
-                            count, allSkinHashes.size(), allCapeHashes.size());
+                    System.out.printf("Hash collection: %d rows | New unique skins: %d | New unique capes: %d%n",
+                            count, newSkinHashes.size(), newCapeHashes.size());
                 }
             }
         } catch (final Exception e) {
@@ -263,7 +268,7 @@ public class IngestJSONL {
 
         final long collectionElapsed = System.currentTimeMillis() - startTime;
         System.out.printf("Hash collection completed. Unique skins: %d | Unique capes: %d | Elapsed: %ds%n",
-                allSkinHashes.size(), allCapeHashes.size(), collectionElapsed / 1000);
+                newSkinHashes.size(), newCapeHashes.size(), collectionElapsed / 1000);
 
         // Bulk upsert skins via staging table
         System.out.println("Upserting skins...");
@@ -274,8 +279,9 @@ public class IngestJSONL {
 
             final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
             final StringBuilder data = new StringBuilder();
-            for (final Map.Entry<String, String> entry : allSkinHashes.entrySet()) {
-                data.append(entry.getKey())
+            for (final Map.Entry<String, String> entry : newSkinHashes.entrySet()) {
+                final String[] parts = entry.getKey().split(":");
+                data.append(parts[0])
                         .append('\t')
                         .append(entry.getValue() == null ? "\\N" : entry.getValue())
                         .append('\n');
@@ -293,7 +299,10 @@ public class IngestJSONL {
             )
             """);
 
-            try (final var rs = s.executeQuery("SELECT id, hash, model FROM skins")) {
+            try (final var rs = s.executeQuery("""
+                SELECT id, hash, model FROM skins
+                WHERE (hash, model) IN (SELECT hash, model FROM skins_staging)
+                """)) {
                 while (rs.next()) skinCache.put(rs.getString("hash") + ":" + rs.getString("model"), rs.getInt("id"));
             }
             System.out.println("Skins upserted: " + skinCache.size());
@@ -313,7 +322,7 @@ public class IngestJSONL {
 
             final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
             final StringBuilder data = new StringBuilder();
-            for (final String hash : allCapeHashes) {
+            for (final String hash : newCapeHashes) {
                 data.append(hash).append('\n');
             }
             copyManager.copyIn("COPY capes_staging FROM STDIN", new StringReader(data.toString()));
@@ -328,7 +337,10 @@ public class IngestJSONL {
             )
             """);
 
-            try (final var rs = s.executeQuery("SELECT id, hash FROM capes")) {
+            try (final var rs = s.executeQuery("""
+                SELECT id, hash FROM capes
+                WHERE hash IN (SELECT hash FROM capes_staging)
+                """)) {
                 while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
             }
             System.out.println("Capes upserted: " + capeCache.size());

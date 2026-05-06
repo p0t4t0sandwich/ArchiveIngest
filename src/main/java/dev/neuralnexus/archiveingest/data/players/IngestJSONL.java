@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -280,16 +281,13 @@ public class IngestJSONL {
                         .append('\n');
             }
             copyManager.copyIn("COPY skins_staging FROM STDIN", new StringReader(data.toString()));
+            s.execute("CREATE INDEX skins_staging_hash_model_idx ON skins_staging (hash, model)");
             System.out.printf("Skin staging table populated. | Elapsed: %ds%n", (System.currentTimeMillis() - startTime) / 1000);
 
             s.execute("""
             INSERT INTO skins (hash, model)
             SELECT hash, model FROM skins_staging
-            WHERE NOT EXISTS (
-                SELECT 1 FROM skins
-                WHERE skins.hash = skins_staging.hash
-                AND skins.model IS NOT DISTINCT FROM skins_staging.model
-            )
+            ON CONFLICT (hash, model) DO NOTHING
             """);
 
             try (final var rs = s.executeQuery("""
@@ -312,6 +310,7 @@ public class IngestJSONL {
              final var s = conn.createStatement()) {
             s.execute("SET work_mem = '1GB'");
             s.execute("CREATE TEMP TABLE capes_staging (hash TEXT)");
+            s.execute("CREATE INDEX capes_staging_hash_idx ON capes_staging (hash)");
 
             final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
             final StringBuilder data = new StringBuilder();
@@ -372,13 +371,16 @@ public class IngestJSONL {
 
         final int DESERIALIZER_THREADS = 1;
         final int RESOLUTION_THREADS = 3;
+        final int INSERT_THREADS = 2;
 
         @SuppressWarnings("resource")
-        final ExecutorService executor = Executors.newFixedThreadPool(1 + DESERIALIZER_THREADS + RESOLUTION_THREADS);
+        final ExecutorService executor = Executors.newFixedThreadPool(1 + DESERIALIZER_THREADS + RESOLUTION_THREADS + INSERT_THREADS);
 
         final AtomicBoolean failed = new AtomicBoolean(false);
         final AtomicInteger deserializerThreadsDone = new AtomicInteger(0);
         final AtomicInteger resolutionThreadsDone = new AtomicInteger(0);
+        final AtomicInteger totalCount = new AtomicInteger(0);
+        final AtomicInteger insertThreadsDone = new AtomicInteger(0);
 
         final long startTime = System.currentTimeMillis();
 
@@ -491,50 +493,68 @@ public class IngestJSONL {
             });
         }
 
-        // DB insert thread (main)
-        try (final var conn = ds.getConnection();
-             final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
-             final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
-             final var playerNameStmt = conn.prepareStatement(INSERT_PLAYER_NAME_SQL)) {
+        for (int i = 0; i < INSERT_THREADS; i++) {
+            executor.submit(() -> {
+                try (final var conn = ds.getConnection();
+                     final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
+                     final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
+                     final var playerNameStmt = conn.prepareStatement(INSERT_PLAYER_NAME_SQL)) {
 
-            conn.setAutoCommit(false);
+                    conn.setAutoCommit(false);
 
-            int count = 0;
-            while (true) {
-                final ResolvedPlayer resolvedPlayer = resolvedQueue.take();
-                if (resolvedPlayer == RESOLVED_POISON_PILL) break;
-                if (failed.get()) {
-                    System.out.println("Worker thread failed, aborting ingestion.");
-                    break;
-                }
-                processPlayer(resolvedPlayer, playerStmt, playerTextureStmt, playerNameStmt);
+                    int localCount = 0;
+                    while (true) {
+                        final ResolvedPlayer resolvedPlayer = resolvedQueue.take();
+                        if (resolvedPlayer == RESOLVED_POISON_PILL) {
+                            resolvedQueue.put(RESOLVED_POISON_PILL);
+                            break;
+                        }
+                        if (failed.get()) break;
 
-                if (++count % BATCH_SIZE == 0) {
+                        processPlayer(resolvedPlayer, playerStmt, playerTextureStmt, playerNameStmt);
+
+                        if (++localCount % BATCH_SIZE == 0) {
+                            playerStmt.executeBatch();
+                            playerTextureStmt.executeBatch();
+                            playerNameStmt.executeBatch();
+                            conn.commit();
+                            final int total = totalCount.addAndGet(BATCH_SIZE);
+                            final long elapsed = System.currentTimeMillis() - startTime;
+                            System.out.printf("Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                                    total, elapsed / 1000, total / Math.max(1, elapsed / 1000));
+                        }
+                    }
+
+                    // Flush remaining
                     playerStmt.executeBatch();
                     playerTextureStmt.executeBatch();
                     playerNameStmt.executeBatch();
                     conn.commit();
+                    final int total = totalCount.addAndGet(localCount % BATCH_SIZE);
                     final long elapsed = System.currentTimeMillis() - startTime;
-                    System.out.printf("Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
-                            count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
-                }
-            }
+                    System.out.printf("Insert thread done. Total rows: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                            total, elapsed / 1000, total / Math.max(1, elapsed / 1000));
 
-            if (!failed.get()) {
-                playerStmt.executeBatch();
-                playerTextureStmt.executeBatch();
-                playerNameStmt.executeBatch();
-                conn.commit();
-                final long elapsed = System.currentTimeMillis() - startTime;
-                System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
-                        count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
-            }
-        } catch (final Exception e) {
+                } catch (final Exception e) {
+                    //noinspection CallToPrintStackTrace
+                    e.printStackTrace();
+                    failed.set(true);
+                } finally {
+                    if (insertThreadsDone.incrementAndGet() == INSERT_THREADS) {
+                        final long elapsed = System.currentTimeMillis() - startTime;
+                        System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                                totalCount.get(), elapsed / 1000, totalCount.get() / Math.max(1, elapsed / 1000));
+                    }
+                }
+            });
+        }
+        try {
+            executor.shutdown();
+            //noinspection ResultOfMethodCallIgnored
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
+        } catch (final InterruptedException e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();
-            System.out.println("An error occurred during ingestion.");
-        } finally {
-            executor.shutdown();
         }
     }
 

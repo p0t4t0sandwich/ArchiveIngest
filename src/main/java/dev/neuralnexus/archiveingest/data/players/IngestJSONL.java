@@ -2,11 +2,6 @@ package dev.neuralnexus.archiveingest.data.players;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
-import com.google.gson.JsonDeserializationContext;
-import com.google.gson.JsonDeserializer;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -21,14 +16,12 @@ import javax.sql.DataSource;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.StringReader;
-import java.lang.reflect.Type;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -552,98 +545,4 @@ public class IngestJSONL {
             @Nullable TextureData textureData,
             @Nullable Integer skinId,
             @Nullable Integer capeId) {}
-
-    public record Player(
-            @NonNull String id,
-            @NonNull String name,
-            @Nullable Boolean legacy,
-            @Nullable Boolean demo,
-            long timestamp,
-            @Nullable JsonObject[] profileActions,
-            Property @Nullable[] properties) {
-        public static class Deserializer implements JsonDeserializer<Player> {
-            private static final Set<String> KNOWN_FIELDS = Set.of("id", "name", "legacy", "demo", "properties", "profileActions");
-            private static final Gson delegate = new GsonBuilder().setLenient().create();
-
-            @Override
-            public Player deserialize(JsonElement json, Type type, JsonDeserializationContext ctx) throws JsonParseException {
-                final JsonObject obj = json.getAsJsonObject();
-                for (final String key : obj.keySet()) {
-                    if (!KNOWN_FIELDS.contains(key)) {
-                        throw new JsonParseException("Unknown field '" + key + "' encountered");
-                    }
-                }
-                return delegate.fromJson(obj, Player.class);
-            }
-        }
-    }
-
-    public record Property(@NonNull String name, @NonNull String value) {}
-
-    public record TextureData(
-            long timestamp,
-            @NonNull String profileId,
-            @NonNull String profileName,
-            @NonNull Textures textures) {
-        public static class Deserializer implements JsonDeserializer<TextureData> {
-            private static final Set<String> KNOWN_FIELDS = Set.of("timestamp", "profileId", "profileName", "signatureRequired", "textures");
-            private static final Gson delegate = new GsonBuilder().setLenient().create();
-
-            @Override
-            public TextureData deserialize(JsonElement json, Type type, JsonDeserializationContext ctx) throws JsonParseException {
-                final JsonObject obj = json.getAsJsonObject();
-                for (final String key : obj.keySet()) {
-                    if (!KNOWN_FIELDS.contains(key)) {
-                        throw new JsonParseException("Unknown field '" + key + "' encountered in TextureData");
-                    }
-                }
-                return delegate.fromJson(obj, TextureData.class);
-            }
-        }
-    }
-
-    // All Skins and Capes are prepended by: "http://textures.minecraft.net/texture/"
-    public record Textures(
-            @Nullable SkinTexture SKIN,
-            @Nullable CapeTexture CAPE) {}
-
-    public record SkinTexture(
-            @NonNull String url,
-            @Nullable SkinMetadata metadata) {
-        public static class Deserializer implements JsonDeserializer<SkinTexture> {
-            private static final Set<String> KNOWN_FIELDS = Set.of("url", "metadata");
-            private static final Gson delegate = new GsonBuilder().setLenient().create();
-
-            @Override
-            public SkinTexture deserialize(JsonElement json, Type type, JsonDeserializationContext ctx) throws JsonParseException {
-                final JsonObject obj = json.getAsJsonObject();
-                for (final String key : obj.keySet()) {
-                    if (!KNOWN_FIELDS.contains(key)) {
-                        throw new JsonParseException("Unknown field '" + key + "' encountered in SkinTexture");
-                    }
-                }
-                return delegate.fromJson(obj, SkinTexture.class);
-            }
-        }
-    }
-
-    public record SkinMetadata(@Nullable String model) {}
-
-    public record CapeTexture(@NonNull String url) {
-        public static class Deserializer implements JsonDeserializer<CapeTexture> {
-            private static final Set<String> KNOWN_FIELDS = Set.of("url");
-            private static final Gson delegate = new GsonBuilder().setLenient().create();
-
-            @Override
-            public CapeTexture deserialize(JsonElement json, Type type, JsonDeserializationContext ctx) throws JsonParseException {
-                final JsonObject obj = json.getAsJsonObject();
-                for (final String key : obj.keySet()) {
-                    if (!KNOWN_FIELDS.contains(key)) {
-                        throw new JsonParseException("Unknown field '" + key + "' encountered in CapeTexture");
-                    }
-                }
-                return delegate.fromJson(obj, CapeTexture.class);
-            }
-        }
-    }
 }

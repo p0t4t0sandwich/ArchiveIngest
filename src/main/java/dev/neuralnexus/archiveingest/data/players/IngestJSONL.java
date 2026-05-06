@@ -280,7 +280,7 @@ public class IngestJSONL {
                         .append('\n');
             }
             copyManager.copyIn("COPY skins_staging FROM STDIN", new StringReader(data.toString()));
-            System.out.println("Skin staging table populated.");
+            System.out.printf("Skin staging table populated. | Elapsed: %ds%n", (System.currentTimeMillis() - startTime) / 1000);
 
             s.execute("""
             INSERT INTO skins (hash, model)
@@ -298,7 +298,7 @@ public class IngestJSONL {
                 """)) {
                 while (rs.next()) skinCache.put(rs.getString("hash") + ":" + rs.getString("model"), rs.getInt("id"));
             }
-            System.out.println("Skins upserted: " + skinCache.size());
+            System.out.printf("Skins upserted: %d | Elapsed: %ds%n", skinCache.size(), (System.currentTimeMillis() - startTime) / 1000);
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();
@@ -319,7 +319,7 @@ public class IngestJSONL {
                 data.append(hash).append('\n');
             }
             copyManager.copyIn("COPY capes_staging FROM STDIN", new StringReader(data.toString()));
-            System.out.println("Cape staging table populated.");
+            System.out.printf("Cape staging table populated. | Elapsed: %ds%n", (System.currentTimeMillis() - startTime) / 1000);
 
             s.execute("""
             INSERT INTO capes (hash)
@@ -336,7 +336,7 @@ public class IngestJSONL {
                 """)) {
                 while (rs.next()) capeCache.put(rs.getString("hash"), rs.getInt("id"));
             }
-            System.out.println("Capes upserted: " + capeCache.size());
+            System.out.printf("Capes upserted: %d | Elapsed: %ds%n", capeCache.size(), (System.currentTimeMillis() - startTime) / 1000);
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
             e.printStackTrace();

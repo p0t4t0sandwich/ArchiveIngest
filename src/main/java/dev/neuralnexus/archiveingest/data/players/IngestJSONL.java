@@ -90,25 +90,28 @@ public class IngestJSONL {
             legacy BOOLEAN,
             demo BOOLEAN,
             profile_actions JSONB,
-            last_updated BIGINT NOT NULL
+            first_seen BIGINT NOT NULL,
+            last_seen BIGINT NOT NULL
         );
     """;
         final String createPlayerTexturesSQL = """
         CREATE TABLE IF NOT EXISTS player_textures (
-            player_id UUID REFERENCES players(id),
-            skin_id INTEGER REFERENCES skins(id),
-            cape_id INTEGER REFERENCES capes(id),
-            last_seen BIGINT NOT NULL,
-            PRIMARY KEY (player_id, last_seen)
-        );
-    """; // TODO: Add FirstSeen
+              player_id UUID REFERENCES players(id),
+              skin_id INTEGER REFERENCES skins(id),
+              cape_id INTEGER REFERENCES capes(id),
+              first_seen BIGINT NOT NULL,
+              last_seen BIGINT NOT NULL,
+              PRIMARY KEY (player_id, skin_id, cape_id)
+          );
+    """;
         final String createPlayerNamesSQL = """
         CREATE TABLE IF NOT EXISTS player_names (
-            player_id UUID REFERENCES players(id),
-            name TEXT NOT NULL,
-            last_seen BIGINT NOT NULL,
-            PRIMARY KEY (player_id, name, last_seen)
-        ); // TODO: Add FirstSeen
+             player_id UUID REFERENCES players(id),
+             name TEXT NOT NULL,
+             first_seen BIGINT NOT NULL,
+             last_seen BIGINT NOT NULL,
+             PRIMARY KEY (player_id, name)
+         );
     """;
 
         try (final var conn = ds.getConnection();
@@ -129,21 +132,29 @@ public class IngestJSONL {
     private static final String TEXTURE_BASE_URL = "http://textures.minecraft.net/texture/";
 
     private static final String INSERT_PLAYER_SQL = """
-        INSERT INTO players (id, name, legacy, demo, profile_actions, last_updated) VALUES (?::uuid, ?, ?, ?, ?::jsonb, ?)
+        INSERT INTO players (id, name, legacy, demo, profile_actions, first_seen, last_seen) VALUES (?::uuid, ?, ?, ?, ?::jsonb, ?, ?)
         ON CONFLICT (id) DO UPDATE SET
-            name = CASE WHEN EXCLUDED.last_updated >= players.last_updated THEN EXCLUDED.name ELSE players.name END,
+            name = CASE WHEN EXCLUDED.last_seen >= players.last_seen THEN EXCLUDED.name ELSE players.name END,
             legacy = COALESCE(EXCLUDED.legacy, players.legacy),
             demo = COALESCE(EXCLUDED.demo, players.demo),
-            profile_actions = CASE WHEN EXCLUDED.last_updated >= players.last_updated THEN EXCLUDED.profile_actions ELSE players.profile_actions END,
-            last_updated = GREATEST(EXCLUDED.last_updated, players.last_updated)
+            profile_actions = CASE WHEN EXCLUDED.last_seen >= players.last_seen THEN EXCLUDED.profile_actions ELSE players.profile_actions END,
+            first_seen = LEAST(EXCLUDED.first_seen, players.first_seen),
+            last_seen = GREATEST(EXCLUDED.last_seen, players.last_seen)
         """;
 
-    // TODO: Add FirstSeen
-    private static final String INSERT_PLAYER_TEXTURE_SQL =
-            "INSERT INTO player_textures (player_id, skin_id, cape_id, last_seen) VALUES (?::uuid, ?, ?, ?) ON CONFLICT (player_id, last_seen) DO NOTHING";
-    private static final String INSERT_PLAYER_NAME_SQL =
-            "INSERT INTO player_names (player_id, name, last_seen) VALUES (?::uuid, ?, ?) ON CONFLICT (player_id, name, last_seen) DO NOTHING";
+    private static final String INSERT_PLAYER_TEXTURE_SQL = """
+        INSERT INTO player_textures (player_id, skin_id, cape_id, first_seen, last_seen) VALUES (?::uuid, ?, ?, ?, ?)
+        ON CONFLICT (player_id, skin_id, cape_id) DO UPDATE SET
+            first_seen = LEAST(EXCLUDED.first_seen, player_textures.first_seen),
+            last_seen = GREATEST(EXCLUDED.last_seen, player_textures.last_seen)
+        """;
 
+    private static final String INSERT_PLAYER_NAME_SQL = """
+        INSERT INTO player_names (player_id, name, first_seen, last_seen) VALUES (?::uuid, ?, ?, ?)
+        ON CONFLICT (player_id, name) DO UPDATE SET
+            first_seen = LEAST(EXCLUDED.first_seen, player_names.first_seen),
+            last_seen = GREATEST(EXCLUDED.last_seen, player_names.last_seen)
+        """;
 
     private static void processPlayer(
             final @NonNull ResolvedPlayer resolvedPlayer,
@@ -163,11 +174,13 @@ public class IngestJSONL {
             playerTextureStmt.setObject(2, resolvedPlayer.skinId());
             playerTextureStmt.setObject(3, resolvedPlayer.capeId());
             playerTextureStmt.setLong(4, textureData.timestamp());
+            playerTextureStmt.setLong(5, textureData.timestamp());
             playerTextureStmt.addBatch();
 
             playerNameStmt.setString(1, player.id());
             playerNameStmt.setString(2, player.name());
             playerNameStmt.setLong(3, textureData.timestamp());
+            playerNameStmt.setLong(4, textureData.timestamp());
             playerNameStmt.addBatch();
         }
 
@@ -177,6 +190,7 @@ public class IngestJSONL {
         playerStmt.setObject(4, player.demo());
         playerStmt.setString(5, gson.toJson(player.profileActions()));
         playerStmt.setLong(6, lastUpdated);
+        playerStmt.setLong(7, lastUpdated);
         playerStmt.addBatch();
     }
 

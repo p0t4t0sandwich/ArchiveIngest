@@ -33,7 +33,7 @@ dependencies {
     compileOnly("org.jspecify:jspecify:1.0.0")
 
     implementation("com.google.code.gson:gson:2.10.1")
-    implementation("it.unimi.dsi:fastutil:8.5.18")
+    //implementation("it.unimi.dsi:fastutil:8.5.18")
     implementation("org.slf4j:slf4j-nop:2.0.17")
 
     implementation("com.zaxxer:HikariCP:6.3.0")

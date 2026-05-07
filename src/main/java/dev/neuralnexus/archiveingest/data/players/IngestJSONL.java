@@ -325,7 +325,6 @@ public class IngestJSONL {
              final var s = conn.createStatement()) {
             s.execute("SET work_mem = '1GB'");
             s.execute("CREATE TEMP TABLE capes_staging (hash TEXT)");
-            s.execute("CREATE INDEX capes_staging_hash_idx ON capes_staging (hash)");
 
             final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
             final StringBuilder data = new StringBuilder();
@@ -333,16 +332,14 @@ public class IngestJSONL {
                 data.append(hash).append('\n');
             }
             copyManager.copyIn("COPY capes_staging FROM STDIN", new StringReader(data.toString()));
+            s.execute("CREATE INDEX capes_staging_hash_idx ON capes_staging (hash)");
             System.out.printf("Cape staging table populated. | Elapsed: %ds%n", (System.currentTimeMillis() - startTime) / 1000);
 
             s.execute("""
-            INSERT INTO capes (hash)
-            SELECT hash FROM capes_staging
-            WHERE NOT EXISTS (
-                SELECT 1 FROM capes
-                WHERE capes.hash = capes_staging.hash
-            )
-            """);
+                INSERT INTO capes (hash)
+                SELECT hash FROM capes_staging
+                ON CONFLICT (hash) DO NOTHING
+                """);
 
             try (final var rs = s.executeQuery("""
                 SELECT id, hash FROM capes
@@ -481,14 +478,13 @@ public class IngestJSONL {
                                 final String model = textureData.textures().SKIN().metadata() != null
                                         ? textureData.textures().SKIN().metadata().model()
                                         : null;
-                                //noinspection deprecation
-                                skinId = localSkinCache.get(skinHash + ":" + model);
+                                final String key = skinHash + ":" + model;
+                                skinId = localSkinCache.containsKey(key) ? localSkinCache.getInt(key) : null;
                             }
 
                             if (textureData.textures().CAPE() != null) {
                                 final String capeHash = textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "");
-                                //noinspection deprecation
-                                capeId = localCapeCache.get(capeHash);
+                                capeId = localCapeCache.containsKey(capeHash) ? localCapeCache.getInt(capeHash) : null;
                             }
                         }
 
@@ -541,10 +537,12 @@ public class IngestJSONL {
                     }
 
                     // Flush remaining
-                    playerStmt.executeBatch();
-                    playerTextureStmt.executeBatch();
-                    playerNameStmt.executeBatch();
-                    conn.commit();
+                    if (!failed.get()) {
+                        playerStmt.executeBatch();
+                        playerTextureStmt.executeBatch();
+                        playerNameStmt.executeBatch();
+                        conn.commit();
+                    }
                     final int total = totalCount.addAndGet(localCount % BATCH_SIZE);
                     final long elapsed = System.currentTimeMillis() - startTime;
                     System.out.printf("Insert thread done. Total rows: %d | Elapsed: %ds | Rate: %d rows/s%n",

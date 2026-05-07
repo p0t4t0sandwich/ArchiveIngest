@@ -98,17 +98,17 @@ public class IngestJSONL {
             player_id UUID REFERENCES players(id),
             skin_id INTEGER REFERENCES skins(id),
             cape_id INTEGER REFERENCES capes(id),
-            timestamp BIGINT NOT NULL,
-            PRIMARY KEY (player_id, timestamp)
+            last_seen BIGINT NOT NULL,
+            PRIMARY KEY (player_id, last_seen)
         );
-    """;
+    """; // TODO: Add FirstSeen
         final String createPlayerNamesSQL = """
         CREATE TABLE IF NOT EXISTS player_names (
             player_id UUID REFERENCES players(id),
             name TEXT NOT NULL,
-            timestamp BIGINT NOT NULL,
-            PRIMARY KEY (player_id, name, timestamp)
-        );
+            last_seen BIGINT NOT NULL,
+            PRIMARY KEY (player_id, name, last_seen)
+        ); // TODO: Add FirstSeen
     """;
 
         try (final var conn = ds.getConnection();
@@ -138,10 +138,11 @@ public class IngestJSONL {
             last_updated = GREATEST(EXCLUDED.last_updated, players.last_updated)
         """;
 
+    // TODO: Add FirstSeen
     private static final String INSERT_PLAYER_TEXTURE_SQL =
-            "INSERT INTO player_textures (player_id, skin_id, cape_id, timestamp) VALUES (?::uuid, ?, ?, ?) ON CONFLICT (player_id, timestamp) DO NOTHING";
+            "INSERT INTO player_textures (player_id, skin_id, cape_id, last_seen) VALUES (?::uuid, ?, ?, ?) ON CONFLICT (player_id, last_seen) DO NOTHING";
     private static final String INSERT_PLAYER_NAME_SQL =
-            "INSERT INTO player_names (player_id, name, timestamp) VALUES (?::uuid, ?, ?) ON CONFLICT (player_id, name, timestamp) DO NOTHING";
+            "INSERT INTO player_names (player_id, name, last_seen) VALUES (?::uuid, ?, ?) ON CONFLICT (player_id, name, last_seen) DO NOTHING";
 
 
     private static void processPlayer(
@@ -261,7 +262,7 @@ public class IngestJSONL {
         }
 
         final long collectionElapsed = System.currentTimeMillis() - startTime;
-        System.out.printf("Hash collection completed. Unique skins: %d | Unique capes: %d | Elapsed: %ds%n",
+        System.out.printf("Hash collection completed. New unique skins: %d | New unique capes: %d | Elapsed: %ds%n",
                 newSkinHashes.size(), newCapeHashes.size(), collectionElapsed / 1000);
 
         // Bulk upsert skins via staging table

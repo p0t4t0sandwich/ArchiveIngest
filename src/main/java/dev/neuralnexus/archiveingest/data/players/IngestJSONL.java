@@ -7,13 +7,10 @@ import com.zaxxer.hikari.HikariDataSource;
 
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
-import org.postgresql.copy.CopyManager;
-import org.postgresql.core.BaseConnection;
 
 import javax.sql.DataSource;
 import java.io.BufferedReader;
 import java.io.FileReader;
-import java.io.StringReader;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.Base64;
@@ -124,6 +121,11 @@ public class IngestJSONL {
             last_seen = GREATEST(EXCLUDED.last_seen, players.last_seen)
         """;
 
+    private static final String INSERT_TEXTURE_SQL = """
+        INSERT INTO textures (hash) VALUES (?)
+        ON CONFLICT (hash) DO NOTHING
+        """;
+
     private static final String INSERT_PLAYER_TEXTURE_SQL = """
         INSERT INTO player_textures (player_id, skin, model, cape, first_seen, last_seen)
         VALUES (?::uuid, ?, ?, ?, ?, ?)
@@ -139,141 +141,11 @@ public class IngestJSONL {
             last_seen = GREATEST(EXCLUDED.last_seen, player_names.last_seen)
         """;
 
-    private static void preIngest(final @NonNull String filePath) {
-        final long startTime = System.currentTimeMillis();
-
-        try (final var conn = ds.getConnection();
-             final var s = conn.createStatement()) {
-
-            s.execute("SET work_mem = '1GB'");
-            s.execute("CREATE TEMP TABLE textures_staging (hash TEXT)");
-
-            final var copyManager = new CopyManager(conn.unwrap(BaseConnection.class));
-
-            System.out.println("Collecting texture hashes...");
-            try (final BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
-                StringBuilder batch = new StringBuilder();
-                String line;
-                int count = 0;
-                int batchHashes = 0;
-
-                while ((line = reader.readLine()) != null) {
-                    final Player player = gson.fromJson(line, Player.class);
-                    if (player.properties() != null) {
-                        for (final Property property : player.properties()) {
-                            if (!property.name().equals("textures")) continue;
-                            final String decoded = new String(Base64.getDecoder().decode(property.value()));
-                            final TextureData textureData = gson.fromJson(decoded, TextureData.class);
-                            if (textureData.textures().SKIN() != null) {
-                                batch.append(textureData.textures().SKIN().url().replace(TEXTURE_BASE_URL, "")).append('\n');
-                                batchHashes++;
-                            }
-                            if (textureData.textures().CAPE() != null) {
-                                batch.append(textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "")).append('\n');
-                                batchHashes++;
-                            }
-                        }
-                    }
-
-                    if (++count % 1000000 == 0) {
-                        System.out.printf("Hash collection: %d rows | Elapsed: %ds%n",
-                                count, (System.currentTimeMillis() - startTime) / 1000);
-                    }
-
-                    if (batchHashes >= 100000) {
-                        copyManager.copyIn("COPY textures_staging FROM STDIN", new StringReader(batch.toString()));
-                        batch = new StringBuilder();
-                        batchHashes = 0;
-                    }
-                }
-
-                // Flush remaining
-                if (batchHashes > 0) {
-                    copyManager.copyIn("COPY textures_staging FROM STDIN", new StringReader(batch.toString()));
-                }
-            }
-
-            System.out.printf("Staging table populated. | Elapsed: %ds%n", (System.currentTimeMillis() - startTime) / 1000);
-
-            s.execute("""
-                INSERT INTO textures (hash)
-                SELECT DISTINCT hash FROM textures_staging
-                ON CONFLICT (hash) DO NOTHING
-                """);
-
-            final long elapsed = System.currentTimeMillis() - startTime;
-            System.out.printf("Pre-ingestion completed. | Elapsed: %ds%n", elapsed / 1000);
-        } catch (final Exception e) {
-            //noinspection CallToPrintStackTrace
-            e.printStackTrace();
-            System.out.println("An error occurred during pre-ingestion.");
-        }
-    }
-
-    public static void ingest(final @NonNull String filePath) {
-        System.out.println("Starting pre-ingestion...");
-        preIngest(filePath);
-
-        final int BATCH_SIZE = 50000;
-        final long startTime = System.currentTimeMillis();
-
-        try (final BufferedReader reader = new BufferedReader(new FileReader(filePath));
-             final var conn = ds.getConnection();
-             final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
-             final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
-             final var playerNameStmt = conn.prepareStatement(INSERT_PLAYER_NAME_SQL)) {
-
-            conn.setAutoCommit(false);
-
-            String line;
-            int count = 0;
-            while ((line = reader.readLine()) != null) {
-                final Player player = gson.fromJson(line, Player.class);
-
-                TextureData textureData = null;
-                if (player.properties() != null) {
-                    for (final Property property : player.properties()) {
-                        if (!property.name().equals("textures")) {
-                            throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
-                        }
-                        final String decoded = new String(Base64.getDecoder().decode(property.value()));
-                        textureData = gson.fromJson(decoded, TextureData.class);
-                    }
-                }
-
-                processPlayer(player, textureData, playerStmt, playerTextureStmt, playerNameStmt);
-
-                if (++count % BATCH_SIZE == 0) {
-                    playerStmt.executeBatch();
-                    playerTextureStmt.executeBatch();
-                    playerNameStmt.executeBatch();
-                    conn.commit();
-                    final long elapsed = System.currentTimeMillis() - startTime;
-                    System.out.printf("Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
-                            count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
-                }
-            }
-
-            // Flush remaining
-            playerStmt.executeBatch();
-            playerTextureStmt.executeBatch();
-            playerNameStmt.executeBatch();
-            conn.commit();
-
-            final long elapsed = System.currentTimeMillis() - startTime;
-            System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
-                    count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
-        } catch (final Exception e) {
-            //noinspection CallToPrintStackTrace
-            e.printStackTrace();
-            System.out.println("An error occurred during ingestion.");
-        }
-    }
-
     private static void processPlayer(
             final @NonNull Player player,
             final @Nullable TextureData textureData,
             final @NonNull PreparedStatement playerStmt,
+            final @NonNull PreparedStatement textureStmt,
             final @NonNull PreparedStatement playerTextureStmt,
             final @NonNull PreparedStatement playerNameStmt) throws SQLException {
         long lastSeen = player.timestamp();
@@ -293,6 +165,16 @@ public class IngestJSONL {
             final String capeHash = textureData.textures().CAPE() != null
                     ? textureData.textures().CAPE().url().replace(TEXTURE_BASE_URL, "")
                     : null;
+
+            if (skinHash != null) {
+                textureStmt.setString(1, skinHash);
+                textureStmt.addBatch();
+            }
+
+            if (capeHash != null) {
+                textureStmt.setString(1, capeHash);
+                textureStmt.addBatch();
+            }
 
             playerTextureStmt.setString(1, player.id());
             playerTextureStmt.setString(2, skinHash);
@@ -318,5 +200,65 @@ public class IngestJSONL {
         playerStmt.setLong(6, firstSeen);
         playerStmt.setLong(7, lastSeen);
         playerStmt.addBatch();
+    }
+
+    public static void ingest(final @NonNull String filePath) {
+        final int BATCH_SIZE = 50000;
+        final long startTime = System.currentTimeMillis();
+
+        try (final BufferedReader reader = new BufferedReader(new FileReader(filePath));
+             final var conn = ds.getConnection();
+             final var playerStmt = conn.prepareStatement(INSERT_PLAYER_SQL);
+             final var textureStmt = conn.prepareStatement(INSERT_TEXTURE_SQL);
+             final var playerTextureStmt = conn.prepareStatement(INSERT_PLAYER_TEXTURE_SQL);
+             final var playerNameStmt = conn.prepareStatement(INSERT_PLAYER_NAME_SQL)) {
+
+            conn.setAutoCommit(false);
+
+            String line;
+            int count = 0;
+            while ((line = reader.readLine()) != null) {
+                final Player player = gson.fromJson(line, Player.class);
+
+                TextureData textureData = null;
+                if (player.properties() != null) {
+                    for (final Property property : player.properties()) {
+                        if (!property.name().equals("textures")) {
+                            throw new IllegalStateException("Unknown property '" + property.name() + "' encountered for player: " + player.id());
+                        }
+                        final String decoded = new String(Base64.getDecoder().decode(property.value()));
+                        textureData = gson.fromJson(decoded, TextureData.class);
+                    }
+                }
+
+                processPlayer(player, textureData, playerStmt, textureStmt, playerTextureStmt, playerNameStmt);
+
+                if (++count % BATCH_SIZE == 0) {
+                    textureStmt.executeBatch();
+                    playerStmt.executeBatch();
+                    playerTextureStmt.executeBatch();
+                    playerNameStmt.executeBatch();
+                    conn.commit();
+                    final long elapsed = System.currentTimeMillis() - startTime;
+                    System.out.printf("Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                            count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
+                }
+            }
+
+            // Flush remaining
+            textureStmt.executeBatch();
+            playerStmt.executeBatch();
+            playerTextureStmt.executeBatch();
+            playerNameStmt.executeBatch();
+            conn.commit();
+
+            final long elapsed = System.currentTimeMillis() - startTime;
+            System.out.printf("Ingestion completed successfully. Rows processed: %d | Elapsed: %ds | Rate: %d rows/s%n",
+                    count, elapsed / 1000, count / Math.max(1, elapsed / 1000));
+        } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
+            e.printStackTrace();
+            System.out.println("An error occurred during ingestion.");
+        }
     }
 }

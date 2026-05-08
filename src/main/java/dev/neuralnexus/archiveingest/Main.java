@@ -4,6 +4,7 @@ import dev.neuralnexus.archiveingest.compression.CompressionType;
 import dev.neuralnexus.archiveingest.compression.GZip;
 import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
+import dev.neuralnexus.archiveingest.data.players.IngestCSV;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
 import org.jspecify.annotations.NonNull;
 
@@ -55,10 +56,16 @@ public class Main {
         }
     }
 
-    private static void handleDataCommand(final @NonNull String subcommand, final @NonNull String inputFile) {
+    private static void handleDataCommand(final @NonNull String subcommand, final @NonNull String inputFile, final String... options) {
         //noinspection SwitchStatementWithTooFewBranches
         switch (subcommand) {
-            case "players" -> IngestJSONL.ingest(inputFile);
+            case "players" -> {
+                switch (inputFile.split("\\.")[1]) {
+                    case "jsonl" -> IngestJSONL.ingest(inputFile);
+                    case "csv" -> IngestCSV.ingest(inputFile, options[0]);
+                    default -> System.out.println("Unsupported file format for players: " + inputFile);
+                }
+            }
             default -> System.out.println("Unsupported data subcommand: " + subcommand);
         }
     }

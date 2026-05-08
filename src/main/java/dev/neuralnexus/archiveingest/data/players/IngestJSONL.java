@@ -183,14 +183,14 @@ public class IngestJSONL {
             playerTextureStmt.setLong(5, firstSeen);
             playerTextureStmt.setLong(6, lastSeen);
             playerTextureStmt.addBatch();
-
-            playerNameStmt.setString(1, player.id());
-            playerNameStmt.setString(2, player.name());
-            playerNameStmt.setLong(3, firstSeen);
-            playerNameStmt.setLong(4, lastSeen);
-            playerNameStmt.addBatch();
         }
         if (firstSeen == 0L) firstSeen = lastSeen;
+
+        playerNameStmt.setString(1, player.id());
+        playerNameStmt.setString(2, player.name());
+        playerNameStmt.setLong(3, firstSeen);
+        playerNameStmt.setLong(4, lastSeen);
+        playerNameStmt.addBatch();
 
         playerStmt.setString(1, player.id());
         playerStmt.setString(2, player.name());

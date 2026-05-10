@@ -33,6 +33,8 @@ dependencies {
     compileOnly("org.jspecify:jspecify:1.0.0")
 
     implementation("com.google.code.gson:gson:2.10.1")
+    implementation("com.moandjiezana.toml:toml4j:0.7.2")
+
     //implementation("it.unimi.dsi:fastutil:8.5.18")
     implementation("org.slf4j:slf4j-nop:2.0.17")
 
@@ -45,4 +47,6 @@ dependencies {
     implementation("com.github.luben:zstd-jni:1.5.7-8:linux_amd64")
     implementation("org.apache.commons:commons-compress:1.28.0")
     implementation("org.tukaani:xz:1.12")
+
+    implementation("io.github.spiderpig86:jayflake:0.1")
 }

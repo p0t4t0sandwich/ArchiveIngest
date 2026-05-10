@@ -2,16 +2,26 @@ package dev.neuralnexus.archiveingest.data.mca;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.ResponseBytes;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CommonPrefix;
+import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.GetObjectResponse;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -22,6 +32,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 public interface Mod extends ArchiveItem {
@@ -36,8 +48,6 @@ public interface Mod extends ArchiveItem {
     @NonNull List<Dependency> dependencies();
     @NonNull List<PlatformRef> platformRefs();
     @NonNull Side side();
-
-    Mod withLoaderSupport(List<LoaderSupport> loaderSupport);
 
     List<String> KNOWN_META_FILES = List.of(
             "fabric.mod.json",
@@ -112,10 +122,90 @@ public interface Mod extends ArchiveItem {
                 mergedLoaderSupport.addAll(secondary.loaderSupport());
             }
 
-            // --- Rebuild primary with merged LoaderSupport if needed ---
-            Mod result = mergedLoaderSupport.equals(primary.loaderSupport())
-                    ? primary
-                    : primary.withLoaderSupport(mergedLoaderSupport);
+            // --- JiJ processing ---
+            List<String> related = new ArrayList<>(primary.related());
+
+            try (JarFile jar = new JarFile(jarPath.toFile())) {
+                List<String> jijPaths = new ArrayList<>();
+
+                // Forge/NeoForge
+                JarEntry forgeManifest = (JarEntry) jar.getEntry("META-INF/jarjar/manifest.json");
+                if (forgeManifest != null) {
+                    try (InputStream in = jar.getInputStream(forgeManifest)) {
+                        JsonObject manifest = GSON.fromJson(new InputStreamReader(in, StandardCharsets.UTF_8), JsonObject.class);
+                        for (JsonElement entry : manifest.getAsJsonArray("jars")) {
+                            jijPaths.add(entry.getAsJsonObject().get("path").getAsString());
+                        }
+                    }
+                }
+
+                // Fabric
+                JarEntry fabricModJson = (JarEntry) jar.getEntry("fabric.mod.json");
+                if (fabricModJson != null) {
+                    try (InputStream in = jar.getInputStream(fabricModJson)) {
+                        JsonObject fabricMeta = GSON.fromJson(new InputStreamReader(in, StandardCharsets.UTF_8), JsonObject.class);
+                        if (fabricMeta.has("jars")) {
+                            for (JsonElement entry : fabricMeta.getAsJsonArray("jars")) {
+                                String path = entry.getAsJsonObject().get("file").getAsString();
+                                if (!jijPaths.contains(path)) jijPaths.add(path);
+                            }
+                        }
+                    }
+                }
+
+                // --- Process each nested jar ---
+                for (String jijPath : jijPaths) {
+                    JarEntry jijEntry = (JarEntry) jar.getEntry(jijPath);
+                    if (jijEntry == null) continue;
+
+                    Path tempDir = Files.createTempDirectory("mca-jij-");
+                    Path tempFile = tempDir.resolve(Path.of(jijPath).getFileName().toString());
+                    try {
+                        // Write nested jar to temp file with correct filename
+                        try (InputStream in = jar.getInputStream(jijEntry)) {
+                            Files.write(tempFile, in.readAllBytes());
+                        }
+
+                        // Attempt ingest — soft fail if no recognised metadata
+                        final Mod jijMod = ingest(tempFile, doneDir, failedDir);
+                        if (jijMod == null) continue;
+
+                        // Check for existing by sha256
+                        Optional<ArchivedMod> existing = findExisting(jijMod.modId(), jijMod.version(), jijMod.sha256());
+                        related.add(existing.map(ArchivedMod::modId).orElseGet(jijMod::modId));
+
+                    } catch (Exception e) {
+                        System.err.println("Skipping JiJ entry " + jijPath + ": " + e.getMessage());
+                    } finally {
+                        Files.deleteIfExists(tempFile);
+                        Files.deleteIfExists(tempDir);
+                    }
+                }
+            }
+
+            final ArchivedMod result = new ArchivedMod(
+                    primary.id(),
+                    primary.fileName(),
+                    primary.size(),
+                    primary.md5(),
+                    primary.sha1(),
+                    primary.sha256(),
+                    primary.sha512(),
+                    related,
+                    primary.links(),
+                    primary.info(),
+                    primary.modId(),
+                    primary.name(),
+                    primary.version(),
+                    primary.description(),
+                    primary.license(),
+                    primary.authors(),
+                    primary.contributors(),
+                    mergedLoaderSupport,
+                    primary.dependencies(),
+                    primary.platformRefs(),
+                    primary.side()
+            );
 
             // --- S3 uploads ---
             final String keyPrefix = "mods/" + result.modId() + "/" + result.version() + "/" + result.id() + "/";
@@ -170,11 +260,11 @@ public interface Mod extends ArchiveItem {
 
     private static Mod ingestForMeta(Path jarPath, String metaFile) throws IOException {
         return switch (metaFile) {
-//            case "fabric.mod.json"              -> FabricMod.ingest(jarPath);
-//            case "META-INF/neoforge.mods.toml"  -> NeoForgeMod.ingest(jarPath);
+            case "fabric.mod.json"              -> FabricMod.ingest(jarPath);
+            case "META-INF/neoforge.mods.toml"  -> NeoForgeMod.ingest(jarPath);
             case "META-INF/mods.toml"           -> ForgeMod.ingest(jarPath);
-//            case "mcmod.info"                   -> LegacyForgeMod.ingest(jarPath);
-//            case "META-INF/sponge_plugins.json" -> SpongeMod.ingest(jarPath);
+            case "mcmod.info"                   -> LegacyForgeMod.ingest(jarPath);
+            case "META-INF/sponge_plugins.json" -> SpongeMod.ingest(jarPath);
 //            case "velocity-plugin.json"         -> VelocityPlugin.ingest(jarPath);
 //            case "plugin.yml"                   -> BukkitPlugin.ingest(jarPath);
 //            case "bungee.yml"                   -> BungeeCordPlugin.ingest(jarPath);
@@ -204,4 +294,59 @@ public interface Mod extends ArchiveItem {
             System.err.println("Failed to process mods in directory: " + e.getMessage());
         }
     }
+
+    private static Optional<ArchivedMod> findExisting(String modId, String version, String sha256) {
+        ListObjectsV2Request listRequest = ListObjectsV2Request.builder()
+                .bucket(BUCKET)
+                .prefix("mods/" + modId + "/" + version + "/")
+                .delimiter("/")
+                .build();
+
+        ListObjectsV2Response listing = s3.listObjectsV2(listRequest);
+
+        for (CommonPrefix prefix : listing.commonPrefixes()) {
+            final String metaKey = prefix.prefix() + "meta.json";
+            try {
+                final ResponseBytes<GetObjectResponse> response = s3.getObjectAsBytes(
+                        GetObjectRequest.builder()
+                                .bucket(BUCKET)
+                                .key(metaKey)
+                                .build()
+                );
+                final ArchivedMod existing = GSON.fromJson(response.asUtf8String(), ArchivedMod.class);
+                if (sha256.equals(existing.sha256())) {
+                    return Optional.of(existing);
+                }
+            } catch (final Exception e) {
+                System.err.println("Skipping " + metaKey + ": " + e.getMessage());
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    record ArchivedMod(
+            @NonNull String id,
+            @NonNull String fileName,
+            long size,
+            @NonNull String md5,
+            @NonNull String sha1,
+            @NonNull String sha256,
+            @NonNull String sha512,
+            @NonNull List<String> related,
+            @NonNull List<Link> links,
+            @NonNull ArchiveInfo info,
+
+            @NonNull String modId,
+            @NonNull String name,
+            @NonNull String version,
+            @Nullable String description,
+            @Nullable String license,
+            @NonNull List<String> authors,
+            @NonNull List<String> contributors,
+            @NonNull List<LoaderSupport> loaderSupport,
+            @NonNull List<Dependency> dependencies,
+            @NonNull List<PlatformRef> platformRefs,
+            @NonNull Side side
+    ) implements Mod {}
 }

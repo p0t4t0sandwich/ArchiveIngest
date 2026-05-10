@@ -49,7 +49,7 @@ public final class IngestJSONL {
         """;
 
     public static void ingest(final @NonNull String filePath) {
-        final int BATCH_SIZE = 50000;
+        final int BATCH_SIZE = 10000;
         final long startTime = System.currentTimeMillis();
 
         try (final BufferedReader reader = new BufferedReader(new FileReader(filePath));

@@ -9,6 +9,7 @@ import java.nio.file.Paths;
 
 public class Zstd {
     public static void decompress(final @NonNull String inputFile, final @NonNull String outputFile) {
+        System.out.println("Starting Zstd decompression for file: " + inputFile);
         try (final ZstdInputStream zis = new ZstdInputStream(Files.newInputStream(Paths.get(inputFile)));
                 final OutputStream os = Files.newOutputStream(Paths.get(outputFile))) {
             final byte[] buffer = new byte[8192];
@@ -18,6 +19,7 @@ public class Zstd {
             }
             System.out.println("Decompression completed successfully.");
         } catch (final Exception e) {
+            //noinspection CallToPrintStackTrace
             e.printStackTrace();
             System.out.println("An error occurred during decompression.");
         }

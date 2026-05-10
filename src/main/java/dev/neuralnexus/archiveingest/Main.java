@@ -6,6 +6,7 @@ import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
 import dev.neuralnexus.archiveingest.data.players.IngestCSV;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
+import dev.neuralnexus.archiveingest.data.players.textures.IngestPNG7z;
 import org.jspecify.annotations.NonNull;
 
 public class Main {
@@ -38,7 +39,13 @@ public class Main {
                     System.out.println("Usage: data <subcommand> <input_file>");
                     return;
                 }
-                handleDataCommand(args[1], args[2]);
+                if (args.length > 3) {
+                    String[] options = new String[args.length - 3];
+                    System.arraycopy(args, 3, options, 0, options.length);
+                    handleDataCommand(args[1], args[2], options);
+                } else {
+                    handleDataCommand(args[1], args[2]);
+                }
             }
             default -> {
                 System.out.println("Unsupported command: " + command);
@@ -57,7 +64,6 @@ public class Main {
     }
 
     private static void handleDataCommand(final @NonNull String subcommand, final @NonNull String inputFile, final String... options) {
-        //noinspection SwitchStatementWithTooFewBranches
         switch (subcommand) {
             case "players" -> {
                 switch (inputFile.split("\\.")[1]) {
@@ -66,6 +72,7 @@ public class Main {
                     default -> System.out.println("Unsupported file format for players: " + inputFile);
                 }
             }
+            case "textures" -> IngestPNG7z.ingestDirOf7z(inputFile, options[0]);
             default -> System.out.println("Unsupported data subcommand: " + subcommand);
         }
     }

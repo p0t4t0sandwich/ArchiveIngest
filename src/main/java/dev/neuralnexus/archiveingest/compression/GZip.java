@@ -9,6 +9,7 @@ import java.io.OutputStream;
 
 public class GZip {
     public static void decompress(final @NonNull String inputFile, final @NonNull String outputFile) {
+        System.out.println("Starting GZip decompression for file: " + inputFile);
         try (final GZIPInputStream gis = new GZIPInputStream(Files.newInputStream(Paths.get(inputFile)));
              final OutputStream os = Files.newOutputStream(Paths.get(outputFile))) {
             final byte[] buffer = new byte[8192];

@@ -135,7 +135,7 @@ public record SpongeMod(
                 links,
                 new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
                 modId,
-                name,
+                Mod.normalizeName(name != null ? name : modId),
                 version,
                 description,
                 null,

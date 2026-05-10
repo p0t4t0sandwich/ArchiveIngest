@@ -79,11 +79,9 @@ public record ForgeMod(
         if (version.equals("${file.jarVersion}")) {
             try (JarFile jar = new JarFile(jarPath.toFile())) {
                 Manifest manifest = jar.getManifest();
-                if (manifest != null) {
-                    version = manifest.getMainAttributes().getValue("Implementation-Version");
-                } else {
-                    version = null;
-                }
+                version = manifest != null
+                        ? manifest.getMainAttributes().getValue("Implementation-Version")
+                        : null;
             }
             if (version == null) throw new IOException("Could not resolve ${file.jarVersion} from MANIFEST.MF");
         }
@@ -96,7 +94,15 @@ public record ForgeMod(
         String license     = toml.getString("license");
 
         // --- Authors ---
-        List<String> authors = parseAuthors((String) mod.getOrDefault("authors", null));
+        List<String> authors = new ArrayList<>();
+        Object rawAuthors = mod.get("authors");
+        if (rawAuthors instanceof String str) {
+            authors = parseAuthors(str);
+        } else if (rawAuthors instanceof List<?> list) {
+            for (Object entry : list) {
+                if (entry instanceof String s) authors.add(s.trim());
+            }
+        }
 
         // --- Links ---
         List<Link> links = new ArrayList<>();
@@ -108,23 +114,45 @@ public record ForgeMod(
         Side side = Side.BOTH;
         List<Dependency> dependencies = new ArrayList<>();
 
-        Map<String, Object> depsBlock = toml.getTable("dependencies") != null
-                ? toml.getTable("dependencies").toMap()
-                : Map.of();
+        Object rawDeps = toml.toMap().get("dependencies");
+        if (rawDeps instanceof Map<?, ?> depsMap) {
+            // [[dependencies.modId]] form
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> modDeps = (List<Map<String, Object>>) depsMap.get(modId);
+            if (modDeps != null) {
+                for (Map<String, Object> dep : modDeps) {
+                    String depId      = (String) dep.get("modId");
+                    String depVersion = (String) dep.getOrDefault("versionRange", null);
+                    boolean mandatory = (boolean) dep.getOrDefault("mandatory", true);
 
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> modDeps = (List<Map<String, Object>>) depsBlock.get(modId);
-        if (modDeps != null) {
-            for (Map<String, Object> dep : modDeps) {
+                    if (depId == null) continue;
+
+                    switch (depId) {
+                        case "minecraft" -> {
+                            mcVersionRange = depVersion;
+                            side = parseSide((String) dep.getOrDefault("side", null));
+                        }
+                        case "forge" -> {
+                            if (depVersion != null) forgeVersionRange = depVersion;
+                        }
+                        default -> dependencies.add(new Dependency(depId, depVersion, mandatory));
+                    }
+                }
+            }
+        } else if (rawDeps instanceof List<?> depsList) {
+            // [[dependencies]] flat form
+            for (Object entry : depsList) {
+                if (!(entry instanceof Map<?, ?> dep)) continue;
                 String depId      = (String) dep.get("modId");
-                String depVersion = (String) dep.getOrDefault("versionRange", null);
-                boolean mandatory = (boolean) dep.getOrDefault("mandatory", true);
+                String depVersion = (String) dep.get("versionRange");
+                boolean mandatory = dep.get("mandatory") instanceof Boolean b && b;
+
+                if (depId == null) continue;
 
                 switch (depId) {
                     case "minecraft" -> {
                         mcVersionRange = depVersion;
-                        String sideStr = (String) dep.getOrDefault("side", null);
-                        side = parseSide(sideStr);
+                        side = parseSide((String) dep.getOrDefault("side", null));
                     }
                     case "forge" -> {
                         if (depVersion != null) forgeVersionRange = depVersion;
@@ -149,11 +177,11 @@ public record ForgeMod(
                 hashes.sha1(),
                 hashes.sha256(),
                 hashes.sha512(),
-                dependencies.stream().map(Dependency::modId).toList(),
+                List.of(),
                 links,
                 new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
                 modId,
-                name != null ? name : modId,
+                Mod.normalizeName(name != null ? name : modId),
                 version,
                 description,
                 license,

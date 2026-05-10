@@ -6,6 +6,7 @@ import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
+import org.semver4j.Semver;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.ResponseBytes;
@@ -92,9 +93,12 @@ public interface Mod extends ArchiveItem {
             final Mod primary = ingestForMeta(jarPath, detected.getFirst());
 
             // --- Secondary ingests ---
+            String resolvedVersion = primary.version();
             final List<LoaderSupport> mergedLoaderSupport = new ArrayList<>(primary.loaderSupport());
             for (int i = 1; i < detected.size(); i++) {
                 final Mod secondary = ingestForMeta(jarPath, detected.get(i));
+
+                resolvedVersion = resolveVersion(resolvedVersion, secondary.version());
 
                 // --- Conflict checks ---
                 if (!primary.modId().equals(secondary.modId())) {
@@ -102,13 +106,6 @@ public interface Mod extends ArchiveItem {
                             "modId conflict between %s ('%s') and %s ('%s')",
                             detected.getFirst(), primary.modId(),
                             detected.get(i), secondary.modId()
-                    ));
-                }
-                if (!primary.version().equals(secondary.version())) {
-                    throw new IOException(String.format(
-                            "version conflict between %s ('%s') and %s ('%s')",
-                            detected.getFirst(), primary.version(),
-                            detected.get(i), secondary.version()
                     ));
                 }
                 if (!primary.name().equals(secondary.name())) {
@@ -196,7 +193,7 @@ public interface Mod extends ArchiveItem {
                     primary.info(),
                     primary.modId(),
                     primary.name(),
-                    primary.version(),
+                    resolvedVersion,
                     primary.description(),
                     primary.license(),
                     primary.authors(),
@@ -323,6 +320,36 @@ public interface Mod extends ArchiveItem {
         }
 
         return Optional.empty();
+    }
+
+    private static String resolveVersion(String primary, String secondary) {
+        if (primary.equals(secondary)) return primary;
+
+        Semver primaryVer   = Semver.coerce(primary);
+        Semver secondaryVer = Semver.coerce(secondary);
+
+        if (primaryVer == null && secondaryVer == null) {
+            throw new RuntimeException(String.format(
+                    "Version conflict between '%s' and '%s' — neither could be parsed",
+                    primary, secondary
+            ));
+        }
+
+        if (primaryVer == null) {
+            System.err.println("Warning: version '" + primary + "' could not be parsed, using '" + secondary + "'");
+            return secondary;
+        }
+
+        if (secondaryVer == null) {
+            System.err.println("Warning: version '" + secondary + "' could not be parsed, using '" + primary + "'");
+            return primary;
+        }
+
+        return primaryVer.isGreaterThanOrEqualTo(secondaryVer) ? primary : secondary;
+    }
+
+    static String normalizeName(final @NonNull String name) {
+        return name.replaceAll("\\s*\\(.*?\\)\\s*$", "").trim();
     }
 
     record ArchivedMod(

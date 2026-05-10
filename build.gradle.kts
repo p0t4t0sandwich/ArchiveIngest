@@ -32,6 +32,8 @@ repositories {
 dependencies {
     compileOnly("org.jspecify:jspecify:1.0.0")
 
+    implementation("org.semver4j:semver4j:6.0.0")
+
     implementation("com.google.code.gson:gson:2.10.1")
     implementation("com.moandjiezana.toml:toml4j:0.7.2")
 

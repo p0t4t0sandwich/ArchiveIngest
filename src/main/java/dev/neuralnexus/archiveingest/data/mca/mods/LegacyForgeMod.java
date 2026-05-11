@@ -1,10 +1,13 @@
-package dev.neuralnexus.archiveingest.data.mca;
+package dev.neuralnexus.archiveingest.data.mca.mods;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
+import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
+import dev.neuralnexus.archiveingest.data.mca.Hashes;
+import dev.neuralnexus.archiveingest.data.mca.Link;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -24,16 +27,13 @@ public record LegacyForgeMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull String md5,
-        @NonNull String sha1,
-        @NonNull String sha256,
-        @NonNull String sha512,
+        @NonNull Hashes hashes,
         @NonNull List<String> related,
         @NonNull List<Link> links,
         @NonNull ArchiveInfo info,
 
         @NonNull String modId,
-        @NonNull String name,
+        List<String> names,
         @NonNull String version,
         @Nullable String description,
         @Nullable String license,
@@ -46,7 +46,7 @@ public record LegacyForgeMod(
 ) implements Mod {
     public static LegacyForgeMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
-        HashUtil.FileHashes hashes = HashUtil.hash(jarPath);
+        Hashes hashes = HashUtil.hash(jarPath);
         String id = SnowflakeIdGenerator.next();
 
         // --- Parse mcmod.info ---
@@ -127,15 +127,12 @@ public record LegacyForgeMod(
                 id,
                 jarPath.getFileName().toString(),
                 hashes.size(),
-                hashes.md5(),
-                hashes.sha1(),
-                hashes.sha256(),
-                hashes.sha512(),
+                hashes,
                 List.of(),
                 links,
                 new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
                 modId,
-                Mod.normalizeName(name != null ? name : modId),
+                name != null ? List.of(name) : List.of(),
                 version,
                 description,
                 null,

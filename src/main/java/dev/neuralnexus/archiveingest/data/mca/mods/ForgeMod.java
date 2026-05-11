@@ -1,8 +1,13 @@
-package dev.neuralnexus.archiveingest.data.mca;
+package dev.neuralnexus.archiveingest.data.mca.mods;
 
 import com.moandjiezana.toml.Toml;
+
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
+
+import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
+import dev.neuralnexus.archiveingest.data.mca.Hashes;
+import dev.neuralnexus.archiveingest.data.mca.Link;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -20,63 +25,60 @@ import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 
-public record NeoForgeMod(
+public record ForgeMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull String md5,
-        @NonNull String sha1,
-        @NonNull String sha256,
-        @NonNull String sha512,
-        @NonNull List<String> related,
-        @NonNull List<Link> links,
+        @NonNull Hashes hashes,
+        List<String> related,
+        List<Link> links,
         @NonNull ArchiveInfo info,
 
         @NonNull String modId,
-        @NonNull String name,
+        List<String> names,
         @NonNull String version,
         @Nullable String description,
         @Nullable String license,
-        @NonNull List<String> authors,
-        @NonNull List<String> contributors,
-        @NonNull List<LoaderSupport> loaderSupport,
-        @NonNull List<Dependency> dependencies,
-        @NonNull List<PlatformRef> platformRefs,
+        List<String> authors,
+        List<String> contributors,
+        List<LoaderSupport> loaderSupport,
+        List<Dependency> dependencies,
+        List<PlatformRef> platformRefs,
         @NonNull Side side,
 
         @Nullable String forgeVersionRange
 ) implements Mod {
-    public static @NonNull NeoForgeMod ingest(Path jarPath) throws IOException {
+    public static @NonNull ForgeMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
-        HashUtil.FileHashes hashes = HashUtil.hash(jarPath);
-        String id = SnowflakeIdGenerator.next();
+        final Hashes hashes = HashUtil.hash(jarPath);
+        final String id = SnowflakeIdGenerator.next();
 
-        // --- Parse neoforge.mods.toml ---
+        // --- Parse mods.toml ---
         final Toml toml;
-        try (JarFile jar = new JarFile(jarPath.toFile())) {
-            JarEntry tomlEntry = (JarEntry) jar.getEntry("META-INF/neoforge.mods.toml");
-            if (tomlEntry == null) throw new IOException("No META-INF/neoforge.mods.toml found in jar");
+        try (final JarFile jar = new JarFile(jarPath.toFile())) {
+            final JarEntry tomlEntry = (JarEntry) jar.getEntry("META-INF/mods.toml");
+            if (tomlEntry == null) throw new IOException("No META-INF/mods.toml found in jar");
 
-            try (InputStream in = jar.getInputStream(tomlEntry)) {
+            try (final InputStream in = jar.getInputStream(tomlEntry)) {
                 toml = new Toml().read(new InputStreamReader(in, StandardCharsets.UTF_8));
             }
         }
 
         // --- [[mods]] block ---
-        List<Map<String, Object>> mods = toml.getList("mods");
-        if (mods == null || mods.isEmpty()) throw new IOException("No [[mods]] entries found in neoforge.mods.toml");
-        Map<String, Object> mod = mods.getFirst();
+        final List<Map<String, Object>> mods = toml.getList("mods");
+        if (mods == null || mods.isEmpty()) throw new IOException("No [[mods]] entries found in mods.toml");
+        final Map<String, Object> mod = mods.getFirst();
 
         // --- Hard required fields ---
-        String modId = (String) mod.get("modId");
+        final String modId = (String) mod.get("modId");
         if (modId == null) throw new IOException("Missing required field: modId");
 
         String version = (String) mod.get("version");
         if (version == null) throw new IOException("Missing required field: version");
 
         if (version.equals("${file.jarVersion}")) {
-            try (JarFile jar = new JarFile(jarPath.toFile())) {
-                Manifest manifest = jar.getManifest();
+            try (final JarFile jar = new JarFile(jarPath.toFile())) {
+                final Manifest manifest = jar.getManifest();
                 version = manifest != null
                         ? manifest.getMainAttributes().getValue("Implementation-Version")
                         : null;
@@ -84,12 +86,12 @@ public record NeoForgeMod(
             if (version == null) throw new IOException("Could not resolve ${file.jarVersion} from MANIFEST.MF");
         }
 
-        String neoForgeVersionRange = toml.getString("loaderVersion");
+        String forgeVersionRange = toml.getString("loaderVersion");
 
         // --- Optional fields ---
-        String name        = (String) mod.getOrDefault("displayName", null);
-        String description = (String) mod.getOrDefault("description", null);
-        String license     = toml.getString("license");
+        final String name        = (String) mod.getOrDefault("displayName", null);
+        final String description = (String) mod.getOrDefault("description", null);
+        final String license     = toml.getString("license");
 
         // --- Authors ---
         List<String> authors = new ArrayList<>();
@@ -103,25 +105,25 @@ public record NeoForgeMod(
         }
 
         // --- Links ---
-        List<Link> links = new ArrayList<>();
-        String displayURL = (String) mod.getOrDefault("displayURL", null);
+        final List<Link> links = new ArrayList<>();
+        final String displayURL = (String) mod.getOrDefault("displayURL", null);
         if (displayURL != null) links.add(new Link("homepage", displayURL));
 
         // --- Dependencies ---
         String mcVersionRange = null;
         Side side = Side.BOTH;
-        List<Dependency> dependencies = new ArrayList<>();
+        final List<Dependency> dependencies = new ArrayList<>();
 
-        Object rawDeps = toml.toMap().get("dependencies");
+        final Object rawDeps = toml.toMap().get("dependencies");
         if (rawDeps instanceof Map<?, ?> depsMap) {
             // [[dependencies.modId]] form
             @SuppressWarnings("unchecked")
-            List<Map<String, Object>> modDeps = (List<Map<String, Object>>) depsMap.get(modId);
+            final List<Map<String, Object>> modDeps = (List<Map<String, Object>>) depsMap.get(modId);
             if (modDeps != null) {
-                for (Map<String, Object> dep : modDeps) {
-                    String depId      = (String) dep.get("modId");
-                    String depVersion = (String) dep.getOrDefault("versionRange", null);
-                    boolean mandatory = (boolean) dep.getOrDefault("mandatory", true);
+                for (final Map<String, Object> dep : modDeps) {
+                    final String depId      = (String) dep.get("modId");
+                    final String depVersion = (String) dep.getOrDefault("versionRange", null);
+                    final boolean mandatory = (boolean) dep.getOrDefault("mandatory", true);
 
                     if (depId == null) continue;
 
@@ -130,8 +132,8 @@ public record NeoForgeMod(
                             mcVersionRange = depVersion;
                             side = parseSide((String) dep.getOrDefault("side", null));
                         }
-                        case "neoforge" -> {
-                            if (depVersion != null) neoForgeVersionRange = depVersion;
+                        case "forge" -> {
+                            if (depVersion != null) forgeVersionRange = depVersion;
                         }
                         default -> dependencies.add(new Dependency(depId, depVersion, mandatory));
                     }
@@ -139,11 +141,11 @@ public record NeoForgeMod(
             }
         } else if (rawDeps instanceof List<?> depsList) {
             // [[dependencies]] flat form
-            for (Object entry : depsList) {
+            for (final Object entry : depsList) {
                 if (!(entry instanceof Map<?, ?> dep)) continue;
-                String depId      = (String) dep.get("modId");
-                String depVersion = (String) dep.get("versionRange");
-                boolean mandatory = dep.get("mandatory") instanceof Boolean b && b;
+                final String depId      = (String) dep.get("modId");
+                final String depVersion = (String) dep.get("versionRange");
+                final boolean mandatory = dep.get("mandatory") instanceof Boolean b && b;
 
                 if (depId == null) continue;
 
@@ -152,8 +154,8 @@ public record NeoForgeMod(
                         mcVersionRange = depVersion;
                         side = parseSide((String) dep.getOrDefault("side", null));
                     }
-                    case "neoforge" -> {
-                        if (depVersion != null) neoForgeVersionRange = depVersion;
+                    case "forge" -> {
+                        if (depVersion != null) forgeVersionRange = depVersion;
                     }
                     default -> dependencies.add(new Dependency(depId, depVersion, mandatory));
                 }
@@ -161,25 +163,22 @@ public record NeoForgeMod(
         }
 
         // --- LoaderSupport ---
-        List<String> mcVersions = mcVersionRange != null ? List.of(mcVersionRange) : List.of();
-        List<LoaderSupport> loaderSupport = List.of(
-                new LoaderSupport(ModLoader.NEOFORGE, mcVersions, "META-INF/neoforge.mods.toml")
+        final List<String> mcVersions = mcVersionRange != null ? List.of(mcVersionRange) : List.of();
+        final List<LoaderSupport> loaderSupport = List.of(
+                new LoaderSupport(ModLoader.FORGE, mcVersions, "META-INF/mods.toml")
         );
 
         // --- Assemble record ---
-        return new NeoForgeMod(
+        return new ForgeMod(
                 id,
                 jarPath.getFileName().toString(),
                 hashes.size(),
-                hashes.md5(),
-                hashes.sha1(),
-                hashes.sha256(),
-                hashes.sha512(),
+                hashes,
                 List.of(),
                 links,
                 new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
                 modId,
-                Mod.normalizeName(name != null ? name : modId),
+                name != null ? List.of(name) : List.of(),
                 version,
                 description,
                 license,
@@ -189,7 +188,7 @@ public record NeoForgeMod(
                 dependencies,
                 List.of(),
                 side,
-                neoForgeVersionRange
+                forgeVersionRange
         );
     }
 

@@ -1,9 +1,13 @@
-package dev.neuralnexus.archiveingest.data.mca;
+package dev.neuralnexus.archiveingest.data.mca.mods;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
+import dev.neuralnexus.archiveingest.data.mca.ArchiveItem;
+import dev.neuralnexus.archiveingest.data.mca.Hashes;
+import dev.neuralnexus.archiveingest.data.mca.Link;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 import org.semver4j.Semver;
@@ -30,24 +34,27 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
 public interface Mod extends ArchiveItem {
     @NonNull String modId();
-    @NonNull String name();
+    Collection<String> names();
     @NonNull String version();
     @NonNull String description();
     @Nullable String license();
-    @NonNull List<String> authors();
-    @NonNull List<String> contributors();
-    @NonNull List<LoaderSupport> loaderSupport();
-    @NonNull List<Dependency> dependencies();
-    @NonNull List<PlatformRef> platformRefs();
+    Collection<String> authors();
+    Collection<String> contributors();
+    Collection<LoaderSupport> loaderSupport();
+    Collection<Dependency> dependencies();
+    Collection<PlatformRef> platformRefs();
     @NonNull Side side();
 
     List<String> KNOWN_META_FILES = List.of(
@@ -93,6 +100,7 @@ public interface Mod extends ArchiveItem {
             final Mod primary = ingestForMeta(jarPath, detected.getFirst());
 
             // --- Secondary ingests ---
+            final Set<String> names = new HashSet<>(primary.names());
             String resolvedVersion = primary.version();
             final List<LoaderSupport> mergedLoaderSupport = new ArrayList<>(primary.loaderSupport());
             for (int i = 1; i < detected.size(); i++) {
@@ -108,13 +116,7 @@ public interface Mod extends ArchiveItem {
                             detected.get(i), secondary.modId()
                     ));
                 }
-                if (!primary.name().equals(secondary.name())) {
-                    throw new IOException(String.format(
-                            "name conflict between %s ('%s') and %s ('%s')",
-                            detected.getFirst(), primary.name(),
-                            detected.get(i), secondary.name()
-                    ));
-                }
+                names.addAll(secondary.names());
 
                 mergedLoaderSupport.addAll(secondary.loaderSupport());
             }
@@ -168,7 +170,7 @@ public interface Mod extends ArchiveItem {
                         if (jijMod == null) continue;
 
                         // Check for existing by sha256
-                        Optional<ArchivedMod> existing = findExisting(jijMod.modId(), jijMod.version(), jijMod.sha256());
+                        Optional<ArchivedMod> existing = findExisting(jijMod.modId(), jijMod.version(), jijMod.hashes().sha256());
                         related.add(existing.map(ArchivedMod::modId).orElseGet(jijMod::modId));
 
                     } catch (Exception e) {
@@ -184,15 +186,12 @@ public interface Mod extends ArchiveItem {
                     primary.id(),
                     primary.fileName(),
                     primary.size(),
-                    primary.md5(),
-                    primary.sha1(),
-                    primary.sha256(),
-                    primary.sha512(),
+                    primary.hashes(),
                     related,
                     primary.links(),
                     primary.info(),
                     primary.modId(),
-                    primary.name(),
+                    names,
                     resolvedVersion,
                     primary.description(),
                     primary.license(),
@@ -311,7 +310,7 @@ public interface Mod extends ArchiveItem {
                                 .build()
                 );
                 final ArchivedMod existing = GSON.fromJson(response.asUtf8String(), ArchivedMod.class);
-                if (sha256.equals(existing.sha256())) {
+                if (sha256.equals(existing.hashes().sha256())) {
                     return Optional.of(existing);
                 }
             } catch (final Exception e) {
@@ -348,32 +347,25 @@ public interface Mod extends ArchiveItem {
         return primaryVer.isGreaterThanOrEqualTo(secondaryVer) ? primary : secondary;
     }
 
-    static String normalizeName(final @NonNull String name) {
-        return name.replaceAll("\\s*\\(.*?\\)\\s*$", "").trim();
-    }
-
     record ArchivedMod(
             @NonNull String id,
             @NonNull String fileName,
             long size,
-            @NonNull String md5,
-            @NonNull String sha1,
-            @NonNull String sha256,
-            @NonNull String sha512,
-            @NonNull List<String> related,
-            @NonNull List<Link> links,
+            @NonNull Hashes hashes,
+            Collection<String> related,
+            Collection<Link> links,
             @NonNull ArchiveInfo info,
 
             @NonNull String modId,
-            @NonNull String name,
+            Collection<String> names,
             @NonNull String version,
             @Nullable String description,
             @Nullable String license,
-            @NonNull List<String> authors,
-            @NonNull List<String> contributors,
-            @NonNull List<LoaderSupport> loaderSupport,
-            @NonNull List<Dependency> dependencies,
-            @NonNull List<PlatformRef> platformRefs,
+            Collection<String> authors,
+            Collection<String> contributors,
+            Collection<LoaderSupport> loaderSupport,
+            Collection<Dependency> dependencies,
+            Collection<PlatformRef> platformRefs,
             @NonNull Side side
     ) implements Mod {}
 }

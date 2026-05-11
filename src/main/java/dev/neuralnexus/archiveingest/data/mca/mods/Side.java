@@ -1,4 +1,4 @@
-package dev.neuralnexus.archiveingest.data.mca;
+package dev.neuralnexus.archiveingest.data.mca.mods;
 
 import com.google.gson.annotations.SerializedName;
 

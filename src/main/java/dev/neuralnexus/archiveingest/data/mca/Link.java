@@ -1,3 +1,5 @@
 package dev.neuralnexus.archiveingest.data.mca;
 
-public record Link(String rel, String href) {}
+import org.jspecify.annotations.NonNull;
+
+public record Link(@NonNull String rel, @NonNull String href) {}

@@ -30,7 +30,7 @@ public final class SnowflakeIdGenerator {
 
     private SnowflakeIdGenerator() {}
 
-    public static String next() {
-        return String.valueOf(GENERATOR.next().value());
+    public static long next() {
+        return GENERATOR.next().value();
     }
 }

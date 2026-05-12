@@ -4,7 +4,8 @@ import dev.neuralnexus.archiveingest.compression.CompressionType;
 import dev.neuralnexus.archiveingest.compression.GZip;
 import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
-import dev.neuralnexus.archiveingest.data.mca.mods.Mod;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModArchive;
+import dev.neuralnexus.archiveingest.data.mca.mods.old.Mod;
 import dev.neuralnexus.archiveingest.data.players.IngestCSV;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
 import dev.neuralnexus.archiveingest.data.players.textures.IngestPNG7z;
@@ -76,28 +77,6 @@ public class Main {
                 }
             }
             case "textures" -> IngestPNG7z.ingestDirOf7z(inputFile, options[0]);
-            case "mod" -> {
-                final Path input = Path.of(inputFile);
-                if (!input.toFile().isFile()) {
-                    System.out.println("Input file must be a file for mod ingestion: " + inputFile);
-                    return;
-                }
-                final Path doneDir = Path.of(options[0]);
-                if (!doneDir.toFile().exists()) {
-                    if (!doneDir.toFile().mkdirs()) {
-                        System.out.println("Failed to create done directory: " + doneDir);
-                        return;
-                    }
-                }
-                final Path failedDir = Path.of(options[1]);
-                if (!failedDir.toFile().exists()) {
-                    if (!failedDir.toFile().mkdirs()) {
-                        System.out.println("Failed to create failed directory: " + failedDir);
-                        return;
-                    }
-                }
-                Mod.ingest(input, doneDir, failedDir);
-            }
             case "mods" -> {
                 final Path inputDir = Path.of(inputFile);
                 if (!inputDir.toFile().isDirectory()) {
@@ -118,7 +97,7 @@ public class Main {
                         return;
                     }
                 }
-                Mod.ingestMods(inputDir, doneDir, failedDir);
+                ModArchive.ingestDir(inputDir, doneDir, failedDir);
             }
             default -> System.out.println("Unsupported data subcommand: " + subcommand);
         }

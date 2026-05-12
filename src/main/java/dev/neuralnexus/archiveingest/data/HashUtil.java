@@ -1,6 +1,6 @@
 package dev.neuralnexus.archiveingest.data;
 
-import dev.neuralnexus.archiveingest.data.mca.Hashes;
+import com.google.gson.annotations.Expose;
 import org.jspecify.annotations.NonNull;
 
 import java.io.IOException;
@@ -50,4 +50,12 @@ public final class HashUtil {
             throw new RuntimeException("Failed to read file for hashing: " + path, e);
         }
     }
+
+    public record Hashes(
+            long size,
+            @NonNull String md5,
+            @NonNull String sha1,
+            @NonNull String sha256,
+            @NonNull String sha512
+    ) {}
 }

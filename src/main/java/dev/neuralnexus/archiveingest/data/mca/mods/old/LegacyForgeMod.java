@@ -1,4 +1,4 @@
-package dev.neuralnexus.archiveingest.data.mca.mods;
+package dev.neuralnexus.archiveingest.data.mca.mods.old;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -6,8 +6,12 @@ import com.google.gson.JsonObject;
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
 import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
-import dev.neuralnexus.archiveingest.data.mca.Hashes;
 import dev.neuralnexus.archiveingest.data.mca.Link;
+import dev.neuralnexus.archiveingest.data.mca.mods.Dependency;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoader;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoaderMeta;
+import dev.neuralnexus.archiveingest.data.mca.mods.Side;
+import dev.neuralnexus.archiveingest.data.mca.Source;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -27,7 +31,7 @@ public record LegacyForgeMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull Hashes hashes,
+        @NonNull HashUtil.Hashes hashes,
         @NonNull List<String> related,
         @NonNull List<Link> links,
         @NonNull ArchiveInfo info,
@@ -39,14 +43,14 @@ public record LegacyForgeMod(
         @Nullable String license,
         @NonNull List<String> authors,
         @NonNull List<String> contributors,
-        @NonNull List<LoaderSupport> loaderSupport,
+        @NonNull List<ModLoaderMeta> loaderSupport,
         @NonNull List<Dependency> dependencies,
-        @NonNull List<PlatformRef> platformRefs,
+        @NonNull List<Source> platformRefs,
         @NonNull Side side
 ) implements Mod {
     public static LegacyForgeMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
-        Hashes hashes = HashUtil.hash(jarPath);
+        HashUtil.Hashes hashes = HashUtil.hash(jarPath);
         String id = SnowflakeIdGenerator.next();
 
         // --- Parse mcmod.info ---
@@ -118,8 +122,8 @@ public record LegacyForgeMod(
         }
 
         // --- LoaderSupport ---
-        List<LoaderSupport> loaderSupport = List.of(
-                new LoaderSupport(ModLoader.FORGE, mcVersions, "mcmod.info")
+        List<ModLoaderMeta> loaderSupport = List.of(
+                new ModLoaderMeta(ModLoader.FORGE, mcVersions, "mcmod.info")
         );
 
         // --- Assemble record ---

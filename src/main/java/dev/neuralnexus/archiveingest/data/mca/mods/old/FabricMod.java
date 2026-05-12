@@ -1,12 +1,16 @@
-package dev.neuralnexus.archiveingest.data.mca.mods;
+package dev.neuralnexus.archiveingest.data.mca.mods.old;
 
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
 import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
-import dev.neuralnexus.archiveingest.data.mca.Hashes;
 import dev.neuralnexus.archiveingest.data.mca.Link;
+import dev.neuralnexus.archiveingest.data.mca.mods.Dependency;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoader;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoaderMeta;
+import dev.neuralnexus.archiveingest.data.mca.mods.Side;
+import dev.neuralnexus.archiveingest.data.mca.Source;
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -26,7 +30,7 @@ public record FabricMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull Hashes hashes,
+        @NonNull HashUtil.Hashes hashes,
         List<String> related,
         List<Link> links,
         @NonNull ArchiveInfo info,
@@ -38,16 +42,16 @@ public record FabricMod(
         @Nullable String license,
         List<String> authors,
         List<String> contributors,
-        List<LoaderSupport> loaderSupport,
+        List<ModLoaderMeta> loaderSupport,
         List<Dependency> dependencies,
-        List<PlatformRef> platformRefs,
+        List<Source> platformRefs,
         @NonNull Side side,
 
         @Nullable String loaderVersionRange
 ) implements Mod {
     public static @NonNull FabricMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
-        final Hashes hashes = HashUtil.hash(jarPath);
+        final HashUtil.Hashes hashes = HashUtil.hash(jarPath);
         final String id = SnowflakeIdGenerator.next();
 
         // --- Parse fabric.mod.json ---
@@ -140,8 +144,8 @@ public record FabricMod(
 
         // --- LoaderSupport ---
         final List<String> mcVersions = mcVersionRange != null ? List.of(mcVersionRange) : List.of();
-        final List<LoaderSupport> loaderSupport = List.of(
-                new LoaderSupport(ModLoader.FABRIC, mcVersions, "fabric.mod.json")
+        final List<ModLoaderMeta> loaderSupport = List.of(
+                new ModLoaderMeta(ModLoader.FABRIC, mcVersions, "fabric.mod.json")
         );
 
         // --- Assemble record ---

@@ -5,7 +5,6 @@ import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
 import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
 import dev.neuralnexus.archiveingest.data.mca.Link;
 import dev.neuralnexus.archiveingest.data.mca.mods.Dependency;
-import dev.neuralnexus.archiveingest.data.mca.mods.ModLoader;
 import dev.neuralnexus.archiveingest.data.mca.mods.ModLoaderMeta;
 import dev.neuralnexus.archiveingest.data.mca.mods.Side;
 import dev.neuralnexus.archiveingest.data.mca.Source;
@@ -17,7 +16,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.jar.JarEntry;
@@ -27,11 +25,13 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 
+import static dev.neuralnexus.archiveingest.data.mca.mods.ModArchive.GSON;
+
 public record SpongeMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull HashUtil.Hashes hashes,
+//        @NonNull HashUtil.Hashes hashes,
         @NonNull List<String> related,
         @NonNull List<Link> links,
         @NonNull ArchiveInfo info,
@@ -49,12 +49,13 @@ public record SpongeMod(
         @NonNull Side side,
 
         @Nullable String apiVersionRange
-) implements Mod {
+) {
+//    implements Mod {
 
     public static SpongeMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
         HashUtil.Hashes hashes = HashUtil.hash(jarPath);
-        String id = SnowflakeIdGenerator.next();
+        String id = String.valueOf(SnowflakeIdGenerator.next());
 
         // --- Parse META-INF/sponge_plugins.json ---
         JsonObject plugin;
@@ -122,31 +123,32 @@ public record SpongeMod(
         }
 
         // --- LoaderSupport ---
-        List<ModLoaderMeta> loaderSupport = List.of(
-                new ModLoaderMeta(ModLoader.SPONGE, mcVersions, "META-INF/sponge_plugins.json")
-        );
+//        List<ModLoaderMeta> loaderSupport = List.of(
+//                new ModLoaderMeta(ModLoader.SPONGE, mcVersions, "META-INF/sponge_plugins.json")
+//        );
 
         // --- Assemble record ---
-        return new SpongeMod(
-                id,
-                jarPath.getFileName().toString(),
-                hashes.size(),
-                hashes,
-                List.of(),
-                links,
-                new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
-                modId,
-                name != null ? List.of(name) : List.of(),
-                version,
-                description,
-                null,
-                List.of(),
-                contributors,
-                loaderSupport,
-                dependencies,
-                List.of(),
-                Side.BOTH,
-                apiVersionRange
-        );
+//        return new SpongeMod(
+//                id,
+//                jarPath.getFileName().toString(),
+//                hashes.size(),
+//                hashes,
+//                List.of(),
+//                links,
+//                new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
+//                modId,
+//                name != null ? List.of(name) : List.of(),
+//                version,
+//                description,
+//                null,
+//                List.of(),
+//                contributors,
+//                loaderSupport,
+//                dependencies,
+//                List.of(),
+//                Side.BOTH,
+//                apiVersionRange
+//        );
+        return null;
     }
 }

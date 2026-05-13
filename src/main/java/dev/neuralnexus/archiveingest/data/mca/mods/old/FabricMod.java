@@ -7,7 +7,6 @@ import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
 import dev.neuralnexus.archiveingest.data.mca.ArchiveInfo;
 import dev.neuralnexus.archiveingest.data.mca.Link;
 import dev.neuralnexus.archiveingest.data.mca.mods.Dependency;
-import dev.neuralnexus.archiveingest.data.mca.mods.ModLoader;
 import dev.neuralnexus.archiveingest.data.mca.mods.ModLoaderMeta;
 import dev.neuralnexus.archiveingest.data.mca.mods.Side;
 import dev.neuralnexus.archiveingest.data.mca.Source;
@@ -19,18 +18,19 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 
+import static dev.neuralnexus.archiveingest.data.mca.mods.ModArchive.GSON;
+
 public record FabricMod(
         @NonNull String id,
         @NonNull String fileName,
         long size,
-        @NonNull HashUtil.Hashes hashes,
+//        @NonNull HashUtil.Hashes hashes,
         List<String> related,
         List<Link> links,
         @NonNull ArchiveInfo info,
@@ -48,11 +48,12 @@ public record FabricMod(
         @NonNull Side side,
 
         @Nullable String loaderVersionRange
-) implements Mod {
+) {
+// implements Mod {
     public static @NonNull FabricMod ingest(Path jarPath) throws IOException {
         // --- Hash jar ---
         final HashUtil.Hashes hashes = HashUtil.hash(jarPath);
-        final String id = SnowflakeIdGenerator.next();
+        final String id = String.valueOf(SnowflakeIdGenerator.next());
 
         // --- Parse fabric.mod.json ---
         JsonObject root;
@@ -144,31 +145,32 @@ public record FabricMod(
 
         // --- LoaderSupport ---
         final List<String> mcVersions = mcVersionRange != null ? List.of(mcVersionRange) : List.of();
-        final List<ModLoaderMeta> loaderSupport = List.of(
-                new ModLoaderMeta(ModLoader.FABRIC, mcVersions, "fabric.mod.json")
-        );
+//        final List<ModLoaderMeta> loaderSupport = List.of(
+//                new ModLoaderMeta(ModLoader.FABRIC, mcVersions, "fabric.mod.json")
+//        );
 
         // --- Assemble record ---
-        return new FabricMod(
-                id,
-                jarPath.getFileName().toString(),
-                hashes.size(),
-                hashes,
-                List.of(),
-                links,
-                new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
-                modId,
-                name != null ? List.of(name) : List.of(),
-                version,
-                description,
-                license,
-                authors,
-                contributors,
-                loaderSupport,
-                dependencies,
-                List.of(),
-                side,
-                loaderVersionRange
-        );
+//        return new FabricMod(
+//                id,
+//                jarPath.getFileName().toString(),
+//                hashes.size(),
+//                hashes,
+//                List.of(),
+//                links,
+//                new ArchiveInfo(Instant.now().toEpochMilli(), null, null, List.of()),
+//                modId,
+//                name != null ? List.of(name) : List.of(),
+//                version,
+//                description,
+//                license,
+//                authors,
+//                contributors,
+//                loaderSupport,
+//                dependencies,
+//                List.of(),
+//                side,
+//                loaderVersionRange
+//        );
+        return null;
     }
 }

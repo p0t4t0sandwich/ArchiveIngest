@@ -7,15 +7,16 @@ import com.google.gson.JsonObject;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
-import dev.neuralnexus.archiveingest.data.mca.Link;
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.HashUtil.Hashes;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
-
+import dev.neuralnexus.archiveingest.data.mca.Link;
 import dev.neuralnexus.archiveingest.data.mca.Source;
 import dev.neuralnexus.archiveingest.data.mca.libraries.JavaLibrary;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.FMLManifestExtractor;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.ForgeModExtractor;
+import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.NeoForgeModExtractor;
+
 import org.jspecify.annotations.NonNull;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -247,9 +248,10 @@ public final class ModArchive {
         }
     }
 
-    private static ExtractResult extractMod(final long id, final @NonNull Path jarPath) throws IOException {
+    private static ExtractResult extractMod(final long id, final Path jarPath) throws IOException {
         try (final JarFile jar = new JarFile(jarPath.toFile())) {
-            if (ForgeModExtractor.supports(jar)) return ForgeModExtractor.extract(id, jarPath);
+            if (NeoForgeModExtractor.supports(jar)) return NeoForgeModExtractor.extract(id, jarPath);
+            if (ForgeModExtractor.supports(jar))    return ForgeModExtractor.extract(id, jarPath);
             if (FMLManifestExtractor.supports(jar)) return FMLManifestExtractor.extract(id, jarPath);
             throw new IOException("No supported extractor found for: " + jarPath.getFileName());
         }
@@ -258,7 +260,7 @@ public final class ModArchive {
     public static void ingest(final @NonNull Path jarPath) throws IOException {
         final long id = SnowflakeIdGenerator.next();
         final String fileName = jarPath.getFileName().toString();
-        final Hashes hashes = HashUtil.hash(jarPath);
+        final HashUtil.Hashes hashes = HashUtil.hash(jarPath);
         final long archivedAt = Instant.now().toEpochMilli();
 
         // --- Extract parent mod metadata ---

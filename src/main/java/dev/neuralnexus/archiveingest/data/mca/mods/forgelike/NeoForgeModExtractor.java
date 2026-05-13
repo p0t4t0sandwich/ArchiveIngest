@@ -1,17 +1,16 @@
 package dev.neuralnexus.archiveingest.data.mca.mods.forgelike;
 
 import dev.neuralnexus.archiveingest.data.mca.mods.ExtractResult;
-
 import org.jspecify.annotations.NonNull;
 
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.jar.JarFile;
 
-public final class ForgeModExtractor {
-    private static final String META_FILE = "META-INF/mods.toml";
+public final class NeoForgeModExtractor {
+    private static final String META_FILE = "META-INF/neoforge.mods.toml";
 
-    private ForgeModExtractor() {}
+    private NeoForgeModExtractor() {}
 
     public static boolean supports(final @NonNull JarFile jar) {
         return jar.getEntry(META_FILE) != null;

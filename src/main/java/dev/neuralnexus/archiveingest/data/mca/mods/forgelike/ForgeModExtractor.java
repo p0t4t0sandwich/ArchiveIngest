@@ -1,7 +1,15 @@
-package dev.neuralnexus.archiveingest.data.mca.mods;
+package dev.neuralnexus.archiveingest.data.mca.mods.forgelike;
 
 import com.moandjiezana.toml.Toml;
+
 import dev.neuralnexus.archiveingest.data.mca.Link;
+import dev.neuralnexus.archiveingest.data.mca.mods.Dependency;
+import dev.neuralnexus.archiveingest.data.mca.mods.ExtractResult;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoader;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModLoaderMeta;
+import dev.neuralnexus.archiveingest.data.mca.mods.ModVersion;
+import dev.neuralnexus.archiveingest.data.mca.mods.Side;
+
 import org.jspecify.annotations.NonNull;
 import org.jspecify.annotations.Nullable;
 
@@ -23,11 +31,11 @@ public final class ForgeModExtractor {
 
     private ForgeModExtractor() {}
 
-    public static boolean supports(JarFile jar) {
+    public static boolean supports(final @NonNull JarFile jar) {
         return jar.getEntry(META_FILE) != null;
     }
 
-    public static @NonNull ExtractResult extract(long archiveItemId, Path jarPath) throws IOException {
+    public static @NonNull ExtractResult extract(final long archiveItemId, final @NonNull Path jarPath) throws IOException {
         final Toml toml;
         try (final JarFile jar = new JarFile(jarPath.toFile())) {
             final JarEntry entry = (JarEntry) jar.getEntry(META_FILE);
@@ -139,7 +147,7 @@ public final class ForgeModExtractor {
     // Helpers
     // ------------------------------------------------------------------
 
-    private static String resolveVersion(Map<String, Object> mod, Path jarPath) throws IOException {
+    private static String resolveVersion(final Map<String, Object> mod, final @NonNull Path jarPath) throws IOException {
         String version = (String) mod.get("version");
         if (version == null) throw new IOException("Missing required field: version");
         if (!version.equals("${file.jarVersion}")) return version;
@@ -154,13 +162,13 @@ public final class ForgeModExtractor {
         }
     }
 
-    private static String requireString(Map<String, Object> map, String key) throws IOException {
+    private static String requireString(final Map<String, Object> map, final @NonNull String key) throws IOException {
         final String val = (String) map.get(key);
         if (val == null || val.isBlank()) throw new IOException("Missing required field: " + key);
         return val.trim();
     }
 
-    private static @Nullable Side parseDisplayTest(@Nullable String raw) {
+    private static @Nullable Side parseDisplayTest(final @Nullable String raw) {
         if (raw == null) return null;
         return switch (raw.toUpperCase()) {
             case "MATCH_VERSION", "IGNORE_ALL_VERSION", "NONE" -> Side.BOTH;
@@ -169,7 +177,7 @@ public final class ForgeModExtractor {
         };
     }
 
-    private static List<String> parseAuthors(Object raw) {
+    private static List<String> parseAuthors(final @Nullable Object raw) {
         switch (raw) {
             case null -> {
                 return List.of();
@@ -191,7 +199,7 @@ public final class ForgeModExtractor {
         return List.of();
     }
 
-    private static Side parseSide(String raw) {
+    private static Side parseSide(final @Nullable String raw) {
         if (raw == null) return Side.BOTH;
         return switch (raw.toUpperCase()) {
             case "CLIENT" -> Side.CLIENT;

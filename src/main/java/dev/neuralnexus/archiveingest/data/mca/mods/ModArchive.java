@@ -4,14 +4,19 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 
 import dev.neuralnexus.archiveingest.data.mca.Link;
 import dev.neuralnexus.archiveingest.data.HashUtil;
 import dev.neuralnexus.archiveingest.data.HashUtil.Hashes;
 import dev.neuralnexus.archiveingest.data.SnowflakeIdGenerator;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import dev.neuralnexus.archiveingest.data.mca.Source;
+import dev.neuralnexus.archiveingest.data.mca.libraries.JavaLibrary;
+import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.FMLManifestExtractor;
+import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.ForgeModExtractor;
+import org.jspecify.annotations.NonNull;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -39,6 +44,14 @@ import java.util.stream.Stream;
 public final class ModArchive {
 
     private ModArchive() {}
+
+    public static final String ARCHIVE_INGEST_USER;
+    static {
+        ARCHIVE_INGEST_USER = System.getenv("ARCHIVE_INGEST_USER");
+        if (ARCHIVE_INGEST_USER == null || ARCHIVE_INGEST_USER.isBlank()) {
+            throw new IllegalStateException("ARCHIVE_INGEST_USER environment variable must be set and non-blank");
+        }
+    }
 
     public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
@@ -223,6 +236,9 @@ public final class ModArchive {
             stmt.execute(CREATE_MOD_VERSIONS_SQL);
             stmt.execute(CREATE_MOD_VERSION_LOADER_META_SQL);
             stmt.execute(CREATE_MOD_VERSION_DEPENDENCIES_SQL);
+
+            JavaLibrary.startup(conn);
+
             System.out.println("Tables are ready.");
         } catch (final Exception e) {
             //noinspection CallToPrintStackTrace
@@ -231,90 +247,104 @@ public final class ModArchive {
         }
     }
 
-    public static void ingest(Path jarPath) throws IOException {
+    private static ExtractResult extractMod(final long id, final @NonNull Path jarPath) throws IOException {
+        try (final JarFile jar = new JarFile(jarPath.toFile())) {
+            if (ForgeModExtractor.supports(jar)) return ForgeModExtractor.extract(id, jarPath);
+            if (FMLManifestExtractor.supports(jar)) return FMLManifestExtractor.extract(id, jarPath);
+            throw new IOException("No supported extractor found for: " + jarPath.getFileName());
+        }
+    }
+
+    public static void ingest(final @NonNull Path jarPath) throws IOException {
         final long id = SnowflakeIdGenerator.next();
         final String fileName = jarPath.getFileName().toString();
         final Hashes hashes = HashUtil.hash(jarPath);
         final long archivedAt = Instant.now().toEpochMilli();
 
         // --- Extract parent mod metadata ---
-        final ExtractResult result;
-        try (final JarFile jar = new JarFile(jarPath.toFile())) {
-            if (!ForgeModExtractor.supports(jar)) {
-                throw new IOException("No supported extractor found for: " + fileName);
-            }
-            result = ForgeModExtractor.extract(id, jarPath);
-        }
+        final ExtractResult result = extractMod(id, jarPath);
 
         final ModVersion modVersion = result.mod();
         final Collection<Link> links = result.links();
 
         // --- Detect and extract JiJ nested jars ---
         final List<JiJEntry> jijEntries = new ArrayList<>();
+        final List<String> jijRelated = new ArrayList<>();
         final Path tempDir = Files.createTempDirectory("mca-jij-");
+
+        final String s3Key = "mods/" + modVersion.modId() + "/" + modVersion.version() + "/" + fileName;
 
         try {
             try (final JarFile jar = new JarFile(jarPath.toFile())) {
-                final List<String> jijPaths = new ArrayList<>();
 
-                // Forge/NeoForge
+                // Forge/NeoForge — META-INF/jarjar/manifest.json, fallback to JavaLibrary
                 final JarEntry forgeManifest = (JarEntry) jar.getEntry("META-INF/jarjar/manifest.json");
                 if (forgeManifest != null) {
                     try (final InputStream in = jar.getInputStream(forgeManifest)) {
                         final JsonObject manifest = GSON.fromJson(new InputStreamReader(in, StandardCharsets.UTF_8), JsonObject.class);
                         for (final JsonElement entry : manifest.getAsJsonArray("jars")) {
-                            jijPaths.add(entry.getAsJsonObject().get("path").getAsString());
+                            final JsonObject jijObj  = entry.getAsJsonObject();
+                            final String jijPath     = jijObj.get("path").getAsString();
+                            final JarEntry jijEntry  = (JarEntry) jar.getEntry(jijPath);
+                            if (jijEntry == null) continue;
+
+                            final Path tempFile = tempDir.resolve(Path.of(jijPath).getFileName().toString());
+                            try (final InputStream jijIn = jar.getInputStream(jijEntry)) {
+                                Files.write(tempFile, jijIn.readAllBytes());
+                            }
+
+                            final long jijId = SnowflakeIdGenerator.next();
+                            final Hashes jijHashes = HashUtil.hash(tempFile);
+
+                            try {
+                                final ExtractResult jijResult = extractMod(jijId, tempFile);
+                                jijEntries.add(new JiJEntry(jijId, tempFile, tempFile.getFileName().toString(), jijHashes, jijResult));
+                                jijRelated.add(jijResult.mod().modId());
+                            } catch (final IOException e) {
+                                final String group      = jijObj.getAsJsonObject("identifier").get("group").getAsString();
+                                final String artifact   = jijObj.getAsJsonObject("identifier").get("artifact").getAsString();
+                                final String libVersion = jijObj.getAsJsonObject("version").get("artifactVersion").getAsString();
+                                final String classifier = jijObj.has("classifier") ? jijObj.get("classifier").getAsString() : null;
+                                final Source jijSource = new Source("jarInJar", s3Key, null, null, null, null);
+                                JavaLibrary.ingest(tempFile, group, artifact, libVersion, classifier, List.of(jijSource));
+                                jijRelated.add(group + ":" + artifact);
+                            }
                         }
                     }
                 }
 
-                // Fabric
+                // Fabric — fabric.mod.json jars array, fail-fast
                 final JarEntry fabricModJson = (JarEntry) jar.getEntry("fabric.mod.json");
                 if (fabricModJson != null) {
                     try (final InputStream in = jar.getInputStream(fabricModJson)) {
                         final JsonObject fabricMeta = GSON.fromJson(new InputStreamReader(in, StandardCharsets.UTF_8), JsonObject.class);
                         if (fabricMeta.has("jars")) {
                             for (final JsonElement entry : fabricMeta.getAsJsonArray("jars")) {
-                                final String path = entry.getAsJsonObject().get("file").getAsString();
-                                if (!jijPaths.contains(path)) jijPaths.add(path);
+                                final String jijPath    = entry.getAsJsonObject().get("file").getAsString();
+                                final JarEntry jijEntry = (JarEntry) jar.getEntry(jijPath);
+                                if (jijEntry == null) continue;
+
+                                final Path tempFile = tempDir.resolve(Path.of(jijPath).getFileName().toString());
+                                try (final InputStream jijIn = jar.getInputStream(jijEntry)) {
+                                    Files.write(tempFile, jijIn.readAllBytes());
+                                }
+
+                                final long jijId = SnowflakeIdGenerator.next();
+                                final Hashes jijHashes = HashUtil.hash(tempFile);
+                                final ExtractResult jijResult = extractMod(jijId, tempFile);
+                                jijEntries.add(new JiJEntry(jijId, tempFile, tempFile.getFileName().toString(), jijHashes, jijResult));
+                                jijRelated.add(jijResult.mod().modId());
                             }
                         }
                     }
                 }
-
-                // --- Extract each nested jar ---
-                for (final String jijPath : jijPaths) {
-                    final JarEntry jijEntry = (JarEntry) jar.getEntry(jijPath);
-                    if (jijEntry == null) continue;
-
-                    final Path tempFile = tempDir.resolve(Path.of(jijPath).getFileName().toString());
-                    try (final InputStream in = jar.getInputStream(jijEntry)) {
-                        Files.write(tempFile, in.readAllBytes());
-                    }
-
-                    final long jijId = SnowflakeIdGenerator.next();
-                    final Hashes jijHashes = HashUtil.hash(tempFile);
-                    final String jijFileName = tempFile.getFileName().toString();
-
-                    final ExtractResult jijResult;
-                    try (final JarFile jijJar = new JarFile(tempFile.toFile())) {
-                        if (!ForgeModExtractor.supports(jijJar)) {
-                            throw new IOException("No supported extractor found for JiJ entry: " + jijFileName);
-                        }
-                        jijResult = ForgeModExtractor.extract(jijId, tempFile);
-                    }
-
-                    jijEntries.add(new JiJEntry(jijId, tempFile, jijFileName, jijHashes, jijResult));
-                }
             }
 
-            // --- Build related modIds from dependencies + JiJ ---
+            // --- Build related ---
             final String[] related = Stream.concat(
                     modVersion.dependencies().stream().map(Dependency::modId),
-                    jijEntries.stream().map(e -> e.result().mod().modId())
+                    jijRelated.stream()
             ).distinct().toArray(String[]::new);
-
-            final String s3Key = "mods/" + modVersion.modId() + "/" + modVersion.version() + "/" + fileName;
 
             // --- DB writes ---
             try (final var conn = ds.getConnection()) {
@@ -329,7 +359,7 @@ public final class ModArchive {
                     ps.setString(7, hashes.sha512());
                     ps.setArray(8, conn.createArrayOf("text", related));
                     ps.setLong(9, archivedAt);
-                    ps.setString(10, null);
+                    ps.setString(10, ARCHIVE_INGEST_USER);
                     ps.executeUpdate();
                 }
 
@@ -345,19 +375,6 @@ public final class ModArchive {
                         }
                         ps.executeBatch();
                     }
-                }
-
-                // --- archive_item_sources (parent S3) ---
-                try (final var ps = conn.prepareStatement(INSERT_ARCHIVE_ITEM_SOURCE_SQL)) {
-                    ps.setLong(1, SnowflakeIdGenerator.next());
-                    ps.setLong(2, id);
-                    ps.setString(3, "s3");
-                    ps.setString(4, s3Key);
-                    ps.setString(5, null);
-                    ps.setString(6, null);
-                    ps.setString(7, null);
-                    ps.setString(8, null);
-                    ps.executeUpdate();
                 }
 
                 // --- mods upsert (parent) ---
@@ -424,8 +441,7 @@ public final class ModArchive {
                 for (final JiJEntry jij : jijEntries) {
                     final ModVersion jijMod = jij.result().mod();
                     final Collection<Link> jijLinks = jij.result().links();
-                    final String jijS3Key = "mods/" + jijMod.modId() + "/" + jijMod.version() + "/" + jij.fileName();
-                    final String[] jijRelated = jijMod.dependencies().stream().map(Dependency::modId).distinct().toArray(String[]::new);
+                    final String[] jijRelatedArr = jijMod.dependencies().stream().map(Dependency::modId).distinct().toArray(String[]::new);
 
                     // archive_items
                     try (final var ps = conn.prepareStatement(INSERT_ARCHIVE_ITEM_SQL)) {
@@ -436,7 +452,7 @@ public final class ModArchive {
                         ps.setString(5, jij.hashes().sha1());
                         ps.setString(6, jij.hashes().sha256());
                         ps.setString(7, jij.hashes().sha512());
-                        ps.setArray(8, conn.createArrayOf("text", jijRelated));
+                        ps.setArray(8, conn.createArrayOf("text", jijRelatedArr));
                         ps.setLong(9, archivedAt);
                         ps.setString(10, null);
                         ps.executeUpdate();
@@ -462,19 +478,6 @@ public final class ModArchive {
                         ps.setLong(2, jij.id());
                         ps.setString(3, "jarInJar");
                         ps.setString(4, s3Key);
-                        ps.setString(5, null);
-                        ps.setString(6, null);
-                        ps.setString(7, null);
-                        ps.setString(8, null);
-                        ps.executeUpdate();
-                    }
-
-                    // archive_item_sources — S3 key for the JiJ jar itself
-                    try (final var ps = conn.prepareStatement(INSERT_ARCHIVE_ITEM_SOURCE_SQL)) {
-                        ps.setLong(1, SnowflakeIdGenerator.next());
-                        ps.setLong(2, jij.id());
-                        ps.setString(3, "s3");
-                        ps.setString(4, jijS3Key);
                         ps.setString(5, null);
                         ps.setString(6, null);
                         ps.setString(7, null);
@@ -587,13 +590,16 @@ public final class ModArchive {
 
     private record JiJEntry(
             long id,
-            Path tempFile,
-            String fileName,
-            Hashes hashes,
-            ExtractResult result
+            @NonNull Path tempFile,
+            @NonNull String fileName,
+            @NonNull Hashes hashes,
+            @NonNull ExtractResult result
     ) {}
 
-    public static void ingestDir(Path inputDir, Path doneDir, Path failedDir) {
+    public static void ingestDir(
+            final @NonNull Path inputDir,
+            final @NonNull Path doneDir,
+            final @NonNull Path failedDir) {
         try (final var stream = Files.list(inputDir)) {
             stream.filter(p -> p.getFileName().toString().endsWith(".jar"))
                     .forEach(jarPath -> {

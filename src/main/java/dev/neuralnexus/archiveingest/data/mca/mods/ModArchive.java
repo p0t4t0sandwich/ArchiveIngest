@@ -254,6 +254,7 @@ public final class ModArchive {
             if (NeoForgeModExtractor.supports(jar)) return NeoForgeModExtractor.extract(id, jarPath);
             if (ForgeModExtractor.supports(jar))    return ForgeModExtractor.extract(id, jarPath);
             if (LegacyForgeModExtractor.supports(jar))   return LegacyForgeModExtractor.extract(id, jarPath);
+            if (FabricModExtractor.supports(jar))   return FabricModExtractor.extract(id, jarPath);
             if (FMLManifestExtractor.supports(jar)) return FMLManifestExtractor.extract(id, jarPath);
             throw new IOException("No supported extractor found for: " + jarPath.getFileName());
         }

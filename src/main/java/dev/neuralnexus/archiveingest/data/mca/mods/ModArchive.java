@@ -63,16 +63,16 @@ public final class ModArchive {
     public static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     public static final S3Client s3 = S3Client.builder()
-            .endpointOverride(URI.create(System.getenv("GARAGE_URL")))
+            .endpointOverride(URI.create(System.getenv("S3_URL")))
             .credentialsProvider(StaticCredentialsProvider.create(
                     AwsBasicCredentials.create(
-                            System.getenv("GARAGE_ACCESS_KEY"),
-                            System.getenv("GARAGE_SECRET_KEY"))))
-            .region(Region.of(System.getenv("GARAGE_REGION")))
+                            System.getenv("AWS_ACCESS_KEY_ID"),
+                            System.getenv("AWS_SECRET_ACCESS_KEY"))))
+            .region(Region.of("us-east-1"))
             .forcePathStyle(true)
             .build();
 
-    public static final String S3_BUCKET = System.getenv("GARAGE_BUCKET");
+    public static final String S3_BUCKET = System.getenv("S3_BUCKET");
 
     public static final DataSource ds;
 

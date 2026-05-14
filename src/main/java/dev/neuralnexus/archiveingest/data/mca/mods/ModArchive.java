@@ -18,6 +18,8 @@ import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.ForgeModExtractor;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.LegacyForgeModExtractor;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.NeoForgeModExtractor;
 
+import dev.neuralnexus.archiveingest.data.mca.mods.sponge.LegacySpongeModExtractor;
+import dev.neuralnexus.archiveingest.data.mca.mods.sponge.SpongeModExtractor;
 import org.jspecify.annotations.NonNull;
 
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -258,8 +260,10 @@ public final class ModArchive {
 
             if (NeoForgeModExtractor.supports(jar))    results.add(NeoForgeModExtractor.extract(id, jarPath));
             if (ForgeModExtractor.supports(jar))        results.add(ForgeModExtractor.extract(id, jarPath));
+            if (LegacySpongeModExtractor.supports(jar)) results.add(LegacySpongeModExtractor.extract(id, jarPath));
             if (LegacyForgeModExtractor.supports(jar)) results.add(LegacyForgeModExtractor.extract(id, jarPath));
             if (FabricModExtractor.supports(jar))       results.add(FabricModExtractor.extract(id, jarPath));
+            if (SpongeModExtractor.supports(jar))       results.add(SpongeModExtractor.extract(id, jarPath));
             if (FMLManifestExtractor.supports(jar))     results.add(FMLManifestExtractor.extract(id, jarPath));
 
             if (results.isEmpty()) {
@@ -308,7 +312,7 @@ public final class ModArchive {
         // --- Deduplicate/merge loaders by ModLoader ---
         final List<ModLoaderMeta> loaders = results.stream()
                 .flatMap(r -> r.mod().loaders().stream())
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         ModLoaderMeta::loader,
                         l -> l,
                         (a, b) -> new ModLoaderMeta(
@@ -321,29 +325,29 @@ public final class ModArchive {
                                         .distinct()
                                         .toList()
                         ),
-                        java.util.LinkedHashMap::new
+                        LinkedHashMap::new
                 ))
                 .values().stream().toList();
 
         // --- Links union, deduplicated by rel ---
         final List<Link> links = results.stream()
                 .flatMap(r -> r.links().stream())
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         Link::rel,
                         l -> l,
-                        (a, b) -> a,
-                        java.util.LinkedHashMap::new
+                        (a, _) -> a,
+                        LinkedHashMap::new
                 ))
                 .values().stream().toList();
 
         // --- First non-null wins for scalars ---
         final String description = results.stream()
                 .map(r -> r.mod().description())
-                .filter(d -> d != null)
+                .filter(Objects::nonNull)
                 .findFirst().orElse(null);
         final String license = results.stream()
                 .map(r -> r.mod().license())
-                .filter(l -> l != null)
+                .filter(Objects::nonNull)
                 .findFirst().orElse(null);
 
         // --- Most specific side wins ---

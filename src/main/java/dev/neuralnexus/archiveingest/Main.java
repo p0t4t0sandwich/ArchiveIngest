@@ -5,7 +5,6 @@ import dev.neuralnexus.archiveingest.compression.GZip;
 import dev.neuralnexus.archiveingest.compression.SevenZip;
 import dev.neuralnexus.archiveingest.compression.Zstd;
 import dev.neuralnexus.archiveingest.data.mca.mods.ModArchive;
-import dev.neuralnexus.archiveingest.data.mca.mods.old.Mod;
 import dev.neuralnexus.archiveingest.data.players.IngestCSV;
 import dev.neuralnexus.archiveingest.data.players.IngestJSONL;
 import dev.neuralnexus.archiveingest.data.players.textures.IngestPNG7z;

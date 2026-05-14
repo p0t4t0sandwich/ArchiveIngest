@@ -16,6 +16,5 @@ public record ModVersion(
         Collection<String> contributors,
         Collection<String> credits,
         Collection<ModLoaderMeta> loaders,
-        Collection<Dependency> dependencies,
         @NonNull Side side
 ) {}

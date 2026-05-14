@@ -102,15 +102,15 @@ final class ForgeLikeModExtractor {
         final String mc = mcVersion != null ? mcVersion : "unknown";
         final List<ModLoaderMeta> loaderMetas = new ArrayList<>();
         if (forgeVersion != null) {
-            loaderMetas.add(new ModLoaderMeta(ModLoader.FORGE, forgeVersion, loaderVersion, mc, metaFile));
+            loaderMetas.add(new ModLoaderMeta(ModLoader.FORGE, forgeVersion, loaderVersion, mc, metaFile, dependencies));
         }
         if (neoVersion != null) {
-            loaderMetas.add(new ModLoaderMeta(ModLoader.NEOFORGE, neoVersion, loaderVersion, mc, metaFile));
+            loaderMetas.add(new ModLoaderMeta(ModLoader.NEOFORGE, neoVersion, loaderVersion, mc, metaFile, dependencies));
         }
         if (loaderMetas.isEmpty()) {
             // loader-agnostic — add both
-            loaderMetas.add(new ModLoaderMeta(ModLoader.FORGE,    null, loaderVersion, mc, metaFile));
-            loaderMetas.add(new ModLoaderMeta(ModLoader.NEOFORGE, null, loaderVersion, mc, metaFile));
+            loaderMetas.add(new ModLoaderMeta(ModLoader.FORGE,    null, loaderVersion, mc, metaFile, dependencies));
+            loaderMetas.add(new ModLoaderMeta(ModLoader.NEOFORGE, null, loaderVersion, mc, metaFile, dependencies));
         }
 
         return new ExtractResult(
@@ -125,7 +125,6 @@ final class ForgeLikeModExtractor {
                         List.of(),
                         credits,
                         loaderMetas,
-                        dependencies,
                         side
                 ),
                 links

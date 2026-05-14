@@ -109,7 +109,8 @@ public final class FMLManifestExtractor {
                         null, // apiVersion — not declared in manifest
                         null,          // loaderVersion — not declared in manifest
                         builtOnMC != null ? builtOnMC : "unknown",
-                        MANIFEST_FILE
+                        MANIFEST_FILE,
+                        List.of()      // dependencies — not declared in manifest
                 ));
             }
 
@@ -125,7 +126,6 @@ public final class FMLManifestExtractor {
                             List.of(),      // contributors
                             List.of(),      // credits
                             loaderMetas,
-                            List.of(),      // dependencies — not declared in manifest
                             parseSide(fmlModType)
                     ),
                     links

@@ -15,6 +15,7 @@ import dev.neuralnexus.archiveingest.data.mca.Source;
 import dev.neuralnexus.archiveingest.data.mca.libraries.JavaLibrary;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.FMLManifestExtractor;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.ForgeModExtractor;
+import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.LegacyForgeModExtractor;
 import dev.neuralnexus.archiveingest.data.mca.mods.forgelike.NeoForgeModExtractor;
 
 import org.jspecify.annotations.NonNull;
@@ -174,7 +175,7 @@ public final class ModArchive {
     private static final String CREATE_MOD_VERSION_DEPENDENCIES_SQL = """
             CREATE TABLE IF NOT EXISTS mod_version_dependencies (
                 id              BIGINT  PRIMARY KEY,
-                mod_version_id  BIGINT  NOT NULL REFERENCES mod_versions(id) ON DELETE CASCADE,
+                loader_meta_id  BIGINT  NOT NULL REFERENCES mod_version_loader_meta(id) ON DELETE CASCADE,
                 mod_id          TEXT    NOT NULL,
                 version_range   TEXT,
                 required        BOOLEAN NOT NULL
@@ -222,7 +223,7 @@ public final class ModArchive {
             """;
 
     private static final String INSERT_MOD_VERSION_DEPENDENCY_SQL = """
-            INSERT INTO mod_version_dependencies (id, mod_version_id, mod_id, version_range, required)
+            INSERT INTO mod_version_dependencies (id, loader_meta_id, mod_id, version_range, required)
             VALUES (?, ?, ?, ?, ?)
             """;
 
@@ -252,6 +253,7 @@ public final class ModArchive {
         try (final JarFile jar = new JarFile(jarPath.toFile())) {
             if (NeoForgeModExtractor.supports(jar)) return NeoForgeModExtractor.extract(id, jarPath);
             if (ForgeModExtractor.supports(jar))    return ForgeModExtractor.extract(id, jarPath);
+            if (LegacyForgeModExtractor.supports(jar))   return LegacyForgeModExtractor.extract(id, jarPath);
             if (FMLManifestExtractor.supports(jar)) return FMLManifestExtractor.extract(id, jarPath);
             throw new IOException("No supported extractor found for: " + jarPath.getFileName());
         }
@@ -307,7 +309,7 @@ public final class ModArchive {
                                 final String artifact   = jijObj.getAsJsonObject("identifier").get("artifact").getAsString();
                                 final String libVersion = jijObj.getAsJsonObject("version").get("artifactVersion").getAsString();
                                 final String classifier = jijObj.has("classifier") ? jijObj.get("classifier").getAsString() : null;
-                                final Source jijSource = new Source("jarInJar", s3Key, null, null, null, null);
+                                final Source jijSource  = new Source("jarInJar", s3Key, null, null, null, null);
                                 JavaLibrary.ingest(tempFile, group, artifact, libVersion, classifier, List.of(jijSource));
                                 jijRelated.add(group + ":" + artifact);
                             }
@@ -344,7 +346,9 @@ public final class ModArchive {
 
             // --- Build related ---
             final String[] related = Stream.concat(
-                    modVersion.dependencies().stream().map(Dependency::modId),
+                    modVersion.loaders().stream()
+                            .flatMap(m -> m.dependencies().stream())
+                            .map(Dependency::modId),
                     jijRelated.stream()
             ).distinct().toArray(String[]::new);
 
@@ -409,10 +413,11 @@ public final class ModArchive {
                     ps.executeUpdate();
                 }
 
-                // --- mod_version_loader_meta (parent) ---
+                // --- mod_version_loader_meta + dependencies (parent) ---
                 try (final var ps = conn.prepareStatement(INSERT_MOD_VERSION_LOADER_META_SQL)) {
                     for (final ModLoaderMeta meta : modVersion.loaders()) {
-                        ps.setLong(1, SnowflakeIdGenerator.next());
+                        final long metaId = SnowflakeIdGenerator.next();
+                        ps.setLong(1, metaId);
                         ps.setLong(2, id);
                         ps.setString(3, meta.loader().name());
                         ps.setString(4, meta.apiVersion());
@@ -420,30 +425,33 @@ public final class ModArchive {
                         ps.setString(6, meta.mcVersion());
                         ps.setString(7, meta.metaSource());
                         ps.addBatch();
+
+                        if (!meta.dependencies().isEmpty()) {
+                            try (final var dps = conn.prepareStatement(INSERT_MOD_VERSION_DEPENDENCY_SQL)) {
+                                for (final Dependency dep : meta.dependencies()) {
+                                    dps.setLong(1, SnowflakeIdGenerator.next());
+                                    dps.setLong(2, metaId);
+                                    dps.setString(3, dep.modId());
+                                    dps.setString(4, dep.versionRange());
+                                    dps.setBoolean(5, dep.required());
+                                    dps.addBatch();
+                                }
+                                dps.executeBatch();
+                            }
+                        }
                     }
                     ps.executeBatch();
-                }
-
-                // --- mod_version_dependencies (parent) ---
-                if (!modVersion.dependencies().isEmpty()) {
-                    try (final var ps = conn.prepareStatement(INSERT_MOD_VERSION_DEPENDENCY_SQL)) {
-                        for (final var dep : modVersion.dependencies()) {
-                            ps.setLong(1, SnowflakeIdGenerator.next());
-                            ps.setLong(2, id);
-                            ps.setString(3, dep.modId());
-                            ps.setString(4, dep.versionRange());
-                            ps.setBoolean(5, dep.required());
-                            ps.addBatch();
-                        }
-                        ps.executeBatch();
-                    }
                 }
 
                 // --- JiJ entries ---
                 for (final JiJEntry jij : jijEntries) {
                     final ModVersion jijMod = jij.result().mod();
                     final Collection<Link> jijLinks = jij.result().links();
-                    final String[] jijRelatedArr = jijMod.dependencies().stream().map(Dependency::modId).distinct().toArray(String[]::new);
+                    final String[] jijRelatedArr = jijMod.loaders().stream()
+                            .flatMap(m -> m.dependencies().stream())
+                            .map(Dependency::modId)
+                            .distinct()
+                            .toArray(String[]::new);
 
                     // archive_items
                     try (final var ps = conn.prepareStatement(INSERT_ARCHIVE_ITEM_SQL)) {
@@ -456,7 +464,7 @@ public final class ModArchive {
                         ps.setString(7, jij.hashes().sha512());
                         ps.setArray(8, conn.createArrayOf("text", jijRelatedArr));
                         ps.setLong(9, archivedAt);
-                        ps.setString(10, null);
+                        ps.setString(10, ARCHIVE_INGEST_USER);
                         ps.executeUpdate();
                     }
 
@@ -517,10 +525,11 @@ public final class ModArchive {
                         ps.executeUpdate();
                     }
 
-                    // mod_version_loader_meta
+                    // mod_version_loader_meta + dependencies
                     try (final var ps = conn.prepareStatement(INSERT_MOD_VERSION_LOADER_META_SQL)) {
                         for (final ModLoaderMeta meta : jijMod.loaders()) {
-                            ps.setLong(1, SnowflakeIdGenerator.next());
+                            final long metaId = SnowflakeIdGenerator.next();
+                            ps.setLong(1, metaId);
                             ps.setLong(2, jij.id());
                             ps.setString(3, meta.loader().name());
                             ps.setString(4, meta.apiVersion());
@@ -528,23 +537,22 @@ public final class ModArchive {
                             ps.setString(6, meta.mcVersion());
                             ps.setString(7, meta.metaSource());
                             ps.addBatch();
+
+                            if (!meta.dependencies().isEmpty()) {
+                                try (final var dps = conn.prepareStatement(INSERT_MOD_VERSION_DEPENDENCY_SQL)) {
+                                    for (final Dependency dep : meta.dependencies()) {
+                                        dps.setLong(1, SnowflakeIdGenerator.next());
+                                        dps.setLong(2, metaId);
+                                        dps.setString(3, dep.modId());
+                                        dps.setString(4, dep.versionRange());
+                                        dps.setBoolean(5, dep.required());
+                                        dps.addBatch();
+                                    }
+                                    dps.executeBatch();
+                                }
+                            }
                         }
                         ps.executeBatch();
-                    }
-
-                    // mod_version_dependencies
-                    if (!jijMod.dependencies().isEmpty()) {
-                        try (final var ps = conn.prepareStatement(INSERT_MOD_VERSION_DEPENDENCY_SQL)) {
-                            for (final var dep : jijMod.dependencies()) {
-                                ps.setLong(1, SnowflakeIdGenerator.next());
-                                ps.setLong(2, jij.id());
-                                ps.setString(3, dep.modId());
-                                ps.setString(4, dep.versionRange());
-                                ps.setBoolean(5, dep.required());
-                                ps.addBatch();
-                            }
-                            ps.executeBatch();
-                        }
                     }
                 }
             } catch (final Exception e) {

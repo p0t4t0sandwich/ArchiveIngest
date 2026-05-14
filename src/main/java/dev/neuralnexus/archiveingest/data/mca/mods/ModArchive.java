@@ -38,9 +38,12 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Objects;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 public final class ModArchive {
@@ -249,15 +252,126 @@ public final class ModArchive {
         }
     }
 
-    private static ExtractResult extractMod(final long id, final Path jarPath) throws IOException {
+    private static ExtractResult extractMod(final long id, final @NonNull Path jarPath) throws IOException {
         try (final JarFile jar = new JarFile(jarPath.toFile())) {
-            if (NeoForgeModExtractor.supports(jar)) return NeoForgeModExtractor.extract(id, jarPath);
-            if (ForgeModExtractor.supports(jar))    return ForgeModExtractor.extract(id, jarPath);
-            if (LegacyForgeModExtractor.supports(jar))   return LegacyForgeModExtractor.extract(id, jarPath);
-            if (FabricModExtractor.supports(jar))   return FabricModExtractor.extract(id, jarPath);
-            if (FMLManifestExtractor.supports(jar)) return FMLManifestExtractor.extract(id, jarPath);
-            throw new IOException("No supported extractor found for: " + jarPath.getFileName());
+            final List<ExtractResult> results = new ArrayList<>();
+
+            if (NeoForgeModExtractor.supports(jar))    results.add(NeoForgeModExtractor.extract(id, jarPath));
+            if (ForgeModExtractor.supports(jar))        results.add(ForgeModExtractor.extract(id, jarPath));
+            if (LegacyForgeModExtractor.supports(jar)) results.add(LegacyForgeModExtractor.extract(id, jarPath));
+            if (FabricModExtractor.supports(jar))       results.add(FabricModExtractor.extract(id, jarPath));
+            if (FMLManifestExtractor.supports(jar))     results.add(FMLManifestExtractor.extract(id, jarPath));
+
+            if (results.isEmpty()) {
+                throw new IOException("No supported extractor found for: " + jarPath.getFileName());
+            }
+
+            if (results.size() == 1) return results.getFirst();
+
+            return merge(results, jarPath.getFileName().toString());
         }
+    }
+
+    private static ExtractResult merge(final List<ExtractResult> results, final @NonNull String fileName) throws IOException {
+        final ModVersion primary = results.getFirst().mod();
+
+        // --- Validate modId and version consistency ---
+        for (final ExtractResult result : results) {
+            if (!result.mod().modId().equals(primary.modId())) {
+                throw new IOException(String.format(
+                        "modId conflict in %s: '%s' vs '%s'",
+                        fileName, primary.modId(), result.mod().modId()
+                ));
+            }
+            if (!result.mod().version().equals(primary.version())) {
+                throw new IOException(String.format(
+                        "version conflict in %s: '%s' vs '%s'",
+                        fileName, primary.version(), result.mod().version()
+                ));
+            }
+        }
+
+        // --- Union collections ---
+        final List<String> names = results.stream()
+                .flatMap(r -> r.mod().names().stream())
+                .distinct().toList();
+        final List<String> authors = results.stream()
+                .flatMap(r -> r.mod().authors().stream())
+                .distinct().toList();
+        final List<String> contributors = results.stream()
+                .flatMap(r -> r.mod().contributors().stream())
+                .distinct().toList();
+        final List<String> credits = results.stream()
+                .flatMap(r -> r.mod().credits().stream())
+                .distinct().toList();
+
+        // --- Deduplicate/merge loaders by ModLoader ---
+        final List<ModLoaderMeta> loaders = results.stream()
+                .flatMap(r -> r.mod().loaders().stream())
+                .collect(java.util.stream.Collectors.toMap(
+                        ModLoaderMeta::loader,
+                        l -> l,
+                        (a, b) -> new ModLoaderMeta(
+                                a.loader(),
+                                a.apiVersion()    != null ? a.apiVersion()    : b.apiVersion(),
+                                a.loaderVersion() != null ? a.loaderVersion() : b.loaderVersion(),
+                                !a.mcVersion().equals("unknown") ? a.mcVersion() : b.mcVersion(),
+                                a.metaSource(),
+                                Stream.concat(a.dependencies().stream(), b.dependencies().stream())
+                                        .distinct()
+                                        .toList()
+                        ),
+                        java.util.LinkedHashMap::new
+                ))
+                .values().stream().toList();
+
+        // --- Links union, deduplicated by rel ---
+        final List<Link> links = results.stream()
+                .flatMap(r -> r.links().stream())
+                .collect(java.util.stream.Collectors.toMap(
+                        Link::rel,
+                        l -> l,
+                        (a, b) -> a,
+                        java.util.LinkedHashMap::new
+                ))
+                .values().stream().toList();
+
+        // --- First non-null wins for scalars ---
+        final String description = results.stream()
+                .map(r -> r.mod().description())
+                .filter(d -> d != null)
+                .findFirst().orElse(null);
+        final String license = results.stream()
+                .map(r -> r.mod().license())
+                .filter(l -> l != null)
+                .findFirst().orElse(null);
+
+        // --- Most specific side wins ---
+        final Side side = results.stream()
+                .map(r -> r.mod().side())
+                .reduce(Side.UNKNOWN, (a, b) -> {
+                    if (a == Side.CLIENT || a == Side.SERVER) return a;
+                    if (b == Side.CLIENT || b == Side.SERVER) return b;
+                    if (a == Side.BOTH || b == Side.BOTH)    return Side.BOTH;
+                    return Side.UNKNOWN;
+                });
+
+        return new ExtractResult(
+                new ModVersion(
+                        primary.id(),
+                        primary.modId(),
+                        names,
+                        primary.version(),
+                        description,
+                        license,
+                        authors,
+                        contributors,
+                        credits,
+                        loaders,
+                        side
+                ),
+                links
+        );
     }
 
     public static void ingest(final @NonNull Path jarPath) throws IOException {
